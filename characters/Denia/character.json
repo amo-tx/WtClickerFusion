@@ -1,0 +1,26 @@
+{
+  "name": "Denia",
+  "fps": 6,
+  "tappo": true,
+  "animations": {
+    "idle": [
+      "idle_0.png"
+    ],
+    "slap_l": [
+      "slap_l_0.png"
+    ],
+    "slap_r": [
+      "slap_r_0.png"
+    ],
+    "key": [
+      "key_0.png",
+      "key_1.png"
+    ]
+  },
+  "outfits": [],
+  "source": "Typing_Pet_Denia (cat.json) 导入转换（点击/按键按概率触发拍打或表情，键盘拍打概率更高）",
+  "tap_rules": {
+    "click": { "slap": 0.7 },
+    "key":   { "slap": 0.85 }
+  }
+}

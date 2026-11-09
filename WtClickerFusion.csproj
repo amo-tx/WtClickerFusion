@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>WtClickerFusion</AssemblyName>
+    <AssemblyTitle>WuwaTappo 融合版（精确状态桥 + 连点调度）</AssemblyTitle>
+    <Product>WtClickerFusion</Product>
+    <Version>1.0.0</Version>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- 角色素材保持为发布目录下的外部 characters/ 文件夹：方便直接用 PetForge
+         继续导入新角色，不必重新编译；单文件 exe 不把这些 PNG 打进包内。 -->
+    <IncludeContentInSingleFile>false</IncludeContentInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- tools/ 是离线测试与抓帧脚本（含独立测试工程），不进主程序 -->
+    <Compile Remove="tools/**" />
+    <None Remove="tools/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 自定义角色库（PetForge 格式）：随发布目录一起复制，运行期从
+         AppContext.BaseDirectory/characters 读取。 -->
+    <Content Include="characters\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--打了精确状态桥补丁的 WuwaTappo 1.0.4（由 Wuwatappo_Helper 的
+        build-preview.cjs 从本机官方原件生成）。内嵌后运行时释放到 %LOCALAPPDATA%，
+        不改动用户已安装的官方客户端。该文件不提交到 Git。 -->
+    <EmbeddedResource Include="payload\payload.exe" />
+  </ItemGroup>
+
+</Project>

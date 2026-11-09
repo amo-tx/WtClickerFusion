@@ -1,0 +1,47 @@
+{
+  "name": "史莱姆酱",
+  "scale": 1.0,
+  "fps": 5,
+  "animations": {
+    "idle": [
+      "frames/idle_0.png",
+      "frames/idle_1.png"
+    ],
+    "happy": [
+      "frames/happy_0.png",
+      "frames/happy_1.png"
+    ],
+    "drag": [
+      "frames/drag_0.png"
+    ]
+  },
+  "outfits": [
+    {
+      "name": "派对帽",
+      "image": "outfits/派对帽.png",
+      "offset": [
+        0,
+        0
+      ],
+      "default": true
+    },
+    {
+      "name": "红领结",
+      "image": "outfits/红领结.png",
+      "offset": [
+        0,
+        0
+      ],
+      "default": false
+    },
+    {
+      "name": "小皇冠",
+      "image": "outfits/小皇冠.png",
+      "offset": [
+        0,
+        0
+      ],
+      "default": false
+    }
+  ]
+}

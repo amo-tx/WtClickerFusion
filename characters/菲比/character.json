@@ -1,0 +1,21 @@
+{
+  "name": "菲比",
+  "fps": 8,
+  "scale": 0.45,
+  "tappo": true,
+  "animations": {
+    "idle": [
+      "frame_idle.png"
+    ],
+    "slap_r": [
+      "frame_slap_r.png",
+      "frame_idle.png"
+    ],
+    "slap_l": [
+      "frame_slap_l.png",
+      "frame_idle.png"
+    ]
+  },
+  "outfits": [],
+  "source": "c108菲比-topaz-upscale-4x.jpg 手部分离方案：左手黑拳(深色法)/右手白手套(多边形截取)抠出，多尺度NS修复补全身体，仅手部动（idle=双手举起，拍打=左右手交替拍下后回到举起）"
+}

@@ -1,0 +1,40 @@
+{
+  "name": "机械猫",
+  "scale": 1.0,
+  "fps": 4,
+  "animations": {
+    "idle": [
+      "frames/idle_0.png",
+      "frames/idle_1.png",
+      "frames/idle_2.png",
+      "frames/idle_3.png"
+    ],
+    "happy": [
+      "frames/happy_0.png",
+      "frames/happy_1.png"
+    ],
+    "drag": [
+      "frames/drag_0.png"
+    ]
+  },
+  "outfits": [
+    {
+      "name": "蓝耳机",
+      "image": "outfits/蓝耳机.png",
+      "offset": [
+        0,
+        0
+      ],
+      "default": true
+    },
+    {
+      "name": "橙围巾",
+      "image": "outfits/橙围巾.png",
+      "offset": [
+        0,
+        0
+      ],
+      "default": false
+    }
+  ]
+}

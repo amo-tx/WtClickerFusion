@@ -1,0 +1,25 @@
+{
+  "name": "露帕",
+  "fps": 8,
+  "scale": 0.6,
+  "tappo": true,
+  "animations": {
+    "idle": [
+      "frame_1.png"
+    ],
+    "slap_l": [
+      "frame_1.png",
+      "frame_2.png",
+      "frame_3.png",
+      "frame_4.png"
+    ],
+    "slap_r": [
+      "frame_4.png",
+      "frame_3.png",
+      "frame_2.png",
+      "frame_1.png"
+    ]
+  },
+  "outfits": [],
+  "source": "Lupa-Monyami 4帧导入 v3（最终帧序：第一次点击 slap_l=1-2-3-4，下一次 slap_r=4-3-2-1，正反序交替；白色镂空已清除）"
+}

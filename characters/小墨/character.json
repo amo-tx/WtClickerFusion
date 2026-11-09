@@ -1,0 +1,25 @@
+{
+  "name": "小墨",
+  "scale": 1.0,
+  "fps": 10,
+  "tappo": true,
+  "animations": {
+    "idle": [
+      "frames/idle_0.png",
+      "frames/idle_1.png"
+    ],
+    "slap_l": [
+      "frames/slap_l_0.png",
+      "frames/slap_l_1.png"
+    ],
+    "slap_r": [
+      "frames/slap_r_0.png",
+      "frames/slap_r_1.png"
+    ],
+    "happy": [
+      "frames/happy_0.png",
+      "frames/happy_1.png"
+    ]
+  },
+  "outfits": []
+}

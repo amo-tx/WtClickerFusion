@@ -1,0 +1,51 @@
+# ---- 构建产物 / 运行时二进制（体积大，且含第三方官方程序）----
+bin/
+obj/
+dist/
+dist_new/
+backup_*/
+payload/
+*.exe
+*.dll
+*.pdb
+*.log
+*.user
+*.suo
+.vs/
+
+# ---- 本地调试与验收产物 ----
+# 抓帧截图可能含联机玩家用户名；源视频为第三方素材，均不进公开仓库
+tools/_*/
+tools/_*
+tools/*.png
+tools/*.zoom*
+tools/*.mp4
+tools/*.b64
+tools/*.bin
+tools/*.log
+tools/*.ps1.cmd.txt
+tools/__pycache__/
+__pycache__/
+
+# ---- 已放弃的 Azure 云端部署方案 / 一次性诊断脚本（本机保留，不进公开仓库）----
+AZURE-DEPLOY.md
+azure-vm-setup.ps1
+tools/cloud-server.py
+tools/check-cloud.py
+tools/gen-runcommand.py
+tools/upload-to-vm.py
+tools/vm-bootstrap.ps1
+tools/vm-receiver.ps1
+tools/vm-receiver-min.ps1
+tools/check-bridge.py
+tools/launch-generated.ps1
+tools/fix-runtime.ps1
+tools/ps-run.py
+tools/pe-imports.py
+tools/rect-check.ps1
+tools/inject-test.ps1
+tools/diag-pet.ps1
+tools/diag-pet2.ps1
+tools/shot-all.ps1
+tools/shot-pet.ps1
+tools/runcommand.txt
