@@ -4,7 +4,41 @@
 
 ![内置 5 个自定义角色](docs/characters-preview.png)
 
-> 本项目是个人自动化与桌面渲染技术的学习实践，**仓库不包含任何官方游戏程序或登录凭据**。角色美术为自制/二次创作素材，权利归原作者所有；请遵守所使用软件的服务条款。
+> 本项目是个人自动化与桌面渲染技术的学习实践，**仓库源码不包含任何官方游戏程序或登录凭据**。Release 的一键运行包内嵌了第三方官方桌宠程序及其精确桥补丁，仅供个人学习与研究使用，请勿商用或公开二次分发；角色美术为自制/二次创作素材，权利归原作者所有。请遵守所使用软件的服务条款。
+
+---
+
+## 一键运行（推荐，不用装任何东西）
+
+到 **[Releases / v1.0.0](https://github.com/amo-tx/WtClickerFusion/releases/tag/v1.0.0)** 下载 `WtClickerFusion-OneClick-v1.0.0.zip`（约 175 MB），然后：
+
+1. **完整解压**到任意文件夹（不要只解压单个文件）。
+2. 双击 `一键运行.bat`；中文文件名若乱码就双击 `RUN.bat`。
+3. 弹出 UAC 时点「是」—— 桌宠是高完整性进程，普通权限下 Windows 会静默拦截点击注入。
+4. 完成：自动开始连点并最小化到托盘。可视化监控页 `http://127.0.0.1:48643/`，状态数据 `/stats`。
+
+包里已经带齐**自包含单文件 exe（内嵌打了精确状态桥补丁的桌宠）、5 个角色、默认配置与 .NET 原生库**：不需要安装 .NET 8，不需要安装官方桌宠客户端，不需要编译。首次启动需解压内嵌组件，约 10–30 秒。
+
+```text
+WtClickerFusion-OneClick-v1.0.0/
+├─ 一键运行.bat / RUN.bat        主入口：自动提权、单实例保护、--start --min
+├─ 设置开机自启.bat              可选：登录时自动启动，无 UAC 弹窗
+├─ 取消开机自启.bat              可选：撤销自启
+├─ 使用说明.txt / SHA256SUMS.txt 中文说明与全量校验值
+├─ WtClickerFusion.exe           自包含单文件
+├─ config.ini / characters/      默认配置与 5 个角色
+└─ *.dll                         .NET 8 单文件发布外置的原生库（缺一不可）
+```
+
+| 环境 | 说明 |
+| --- | --- |
+| Windows 10/11 x64 | 必需 |
+| WebView2 Runtime | Win11 与多数 Win10 已自带；桌宠窗口始终不出现时再装 |
+| VC++ 2015–2022 x64 | 多数已装；报 `STATUS_DLL_NOT_FOUND` 时安装 |
+
+主入口带**单实例保护**：重复双击不会抢占 48643 端口导致精确桥回退 OCR 模式。`config.ini` 默认开启宝箱秒领、角色窗口与真实键鼠同步，开箱即用。
+
+> 一键包内嵌第三方官方桌宠程序及其补丁，**仅供个人学习与研究，请勿商用或公开二次分发**；仓库源码不含 `payload/payload.exe`，自行构建仍需自备。包内 `使用说明.txt` 有完整故障排查。
 
 ---
 
@@ -38,7 +72,9 @@
 
 ---
 
-## 快速开始
+## 从源码构建（进阶）
+
+只是想用程序的话，直接看上面的「一键运行」。
 
 **环境**：Windows 10/11 x64、.NET 8 SDK（仅构建时需要）、Python 3 + Pillow/OpenCV（仅重生成角色素材或跑验收脚本时需要）。
 
@@ -50,7 +86,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
   -p:IncludeNativeLibrariesForSelfExtract=true -o dist_new
 
 # 3. 把 characters/ 复制到 dist_new/ 同级（csproj 用 Content 外部复制，不内嵌）
-# 4. 运行 dist_new/WtClickerFusion.exe
+# 4. 运行 dist_new/WtClickerFusion.exe --start --min
 ```
 
 启动后：打开主窗体点「测试一次」确认注入通道有效，再点「开始连点」。状态页访问 `http://127.0.0.1:48643/`，机器可读状态为 `/stats`。
@@ -65,6 +101,8 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | `petName` / `petEnabled` / `petScale` / `petPos` / `petDrag` | 角色选择、缩放、位置与拖动 |
 | `petRealInput` | 真实鼠标/键盘输入是否同步驱动角色 |
 
+命令行参数：`--start`（启动即连点）、`--min`（最小化）、`--web`（面板对局域网开放只读）、`--cdp`（WebView2 9223 调试端口）、`--selftest`（无头抓帧自检）。
+
 ---
 
 ## 目录结构
@@ -74,6 +112,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | `*.cs` / `WtClickerFusion.csproj` | 主程序源码（引擎、精确桥、OCR、注入、UI、角色窗口、自启） |
 | `characters/` | 5 个角色的帧图与 `character.json` |
 | `docs/` | 本 README 使用的示意图 |
+| `tools/make_onekey.py` | 可复现地生成 Release 的一键运行包（从 `dist/` 挑选最小可运行集） |
 | `tools/import_nabo.py`、`strip_white_rim.py`、`white_edge_check.py` | 角色抠图、去白边、边缘复核 |
 | `tools/extract_frames.py`、`analyze_hands.py`、`hand_states.py` | 视频逐帧导出与动作相位分析 |
 | `tools/verify_*.py` | 实机验收：角色切换、动画状态机、点击同步、真实键鼠输入 |
@@ -84,16 +123,16 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 python tools/verify_all_pets.py <PID> dist_new/WtClicker.log   # 全部角色切换重绘
 python tools/verify_nabo_states.py <PID> 30                     # 30 秒左右手交替 / 兴奋段
 python tools/verify_real_input.py <PID>                         # 真实键鼠与注入去重
+python tools/make_onekey.py                                     # 重新打包一键运行包
 ```
 
 ---
 
 ## 构建依赖与已知限制
 
-- **`payload/payload.exe` 未包含**：它是打了精确状态桥补丁的官方桌宠程序，作为 `EmbeddedResource` 内嵌进单文件 exe，属于第三方二进制，不随仓库分发。没有它 `dotnet publish` 会缺资源。
+- **`payload/payload.exe` 未包含在源码里**：它是打了精确状态桥补丁的官方桌宠程序，作为 `EmbeddedResource` 内嵌进单文件 exe，属于第三方二进制。没有它 `dotnet publish` 会缺资源；Release 的一键包已包含编译好的成品。
 - **精确桥补丁 `wt-fusion-bridge.js` 未包含**：它属于配套的 `Wuwatappo_Helper` 项目，负责在桌宠内部 POST 状态；没有它程序会回退到 OCR 模式。
-- **发布用 exe 未包含**：单文件产物超过 100 MB，且内嵌第三方程序，不适合放进仓库；请自行构建。
-- `dist/` `bin/` `obj/`、抓帧截图、源视频与云端部署脚本均由 `.gitignore` 排除（截图可能含联机玩家昵称）。
+- **仓库内不存放二进制**：`dist/` `bin/` `obj/`、抓帧截图、源视频与云端部署脚本均由 `.gitignore` 排除（截图可能含联机玩家昵称）。编译产物只通过 Release 资产分发。
 - 深色背景上白色毛球/手套周围仍可能有个别离散高光点（源素材 + GDI+ 双三次插值 overshoot），已不是连续白边。
 
 ---
