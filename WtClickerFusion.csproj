@@ -9,7 +9,7 @@
     <AssemblyName>WtClickerFusion</AssemblyName>
     <AssemblyTitle>WuwaTappo 融合版（精确状态桥 + 连点调度）</AssemblyTitle>
     <Product>WtClickerFusion</Product>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- 角色素材保持为发布目录下的外部 characters/ 文件夹：方便直接用 PetForge
          继续导入新角色，不必重新编译；单文件 exe 不把这些 PNG 打进包内。 -->
@@ -29,6 +29,16 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ★ 单文件版：把 characters/ 的全部帧图与 character.json 编进 exe。
+         运行时由 EmbeddedAssets.Ensure() 释放到 %LOCALAPPDATA%，双击一个 exe
+         就有全部角色，不需要旁边的 characters/ 文件夹。
+         LogicalName 保留相对路径，否则 MSBuild 会把目录压成 '.' 无法还原。 -->
+    <EmbeddedResource Include="characters\**\*">
+      <LogicalName>WtAsset/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

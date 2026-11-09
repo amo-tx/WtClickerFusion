@@ -71,11 +71,19 @@ namespace WtClickerGUI
 
             ApplicationConfiguration.Initialize();
 
+            // ★ 单文件版：把内嵌的 characters/ 释放到 %LOCALAPPDATA%，双击 exe 就有全部角色。
+            EmbeddedAssets.Ensure();
+            StartLog(EmbeddedAssets.Error != null
+                ? "⚠️ 内嵌角色素材释放失败：" + EmbeddedAssets.Error + "（exe 同目录若有 characters/ 仍可用）"
+                : $"● 内嵌角色素材已就绪：{EmbeddedAssets.FileCount} 个文件 → {EmbeddedAssets.CharactersDir}");
+
             StartLog("● 权限检查通过：管理员（高完整性），PostMessage 注入不会被 UIPI 拦截");
             WebMode = args.Contains("--web");
             CdpMode = args.Contains("--cdp");
-            bool startArg = args.Contains("--start");
+            // ★ 纯双击即运行全部内容：默认自动开始连点，只有 --nostart 才需手动点「开始」。
+            bool startArg = !args.Contains("--nostart");
             bool minArg = args.Contains("--min");
+            if (startArg) StartLog("● 默认自动开始连点（如需手动开始请加 --nostart）");
             if (WebMode) StartLog("● 远程监控模式（--web）：桥监听 0.0.0.0:48643，状态上报仍限本机；浏览器访问 http://<本机IP>:48643/ 查看监控面板");
 
             // ---- 融合版：先起本地桥，再拉起内嵌的「打了精确状态补丁」的桌宠

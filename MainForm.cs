@@ -181,7 +181,7 @@ namespace WtClickerGUI
             };
 
             // ================= 自定义角色（PetForge 格式角色库） =================
-            _charLib = new CharacterLibrary(System.IO.Path.Combine(AppContext.BaseDirectory, "characters"));
+            _charLib = new CharacterLibrary(ResolveCharacterRoot());
             cfg.Controls.Add(MkLabel("自定义角色", 18, 282, cfg, Ink, 9.5F, bold: true));
             _cmbPet = new ComboBox
             {
@@ -638,8 +638,34 @@ namespace WtClickerGUI
             return System.Text.Json.JsonSerializer.Serialize(obj);
         }
 
-        // ---------------------------------------------------------------- 配置持久化（借鉴 WuwaTappoClicker 的 config.json）
-        string ConfigPath => System.IO.Path.Combine(AppContext.BaseDirectory, "config.ini");
+        // ---------------------------------------------------------------- 资源路径与配置持久化
+        /// <summary>外部 characters/ 优先（方便继续用 PetForge 往 exe 旁边加角色）；
+        /// 单文件版回退到 EmbeddedAssets 从 exe 内嵌资源释放出来的目录。</summary>
+        static string ResolveCharacterRoot()
+        {
+            string external = System.IO.Path.Combine(AppContext.BaseDirectory, "characters");
+            try
+            {
+                if (System.IO.Directory.Exists(external) &&
+                    System.IO.Directory.GetDirectories(external).Length > 0)
+                    return external;
+            }
+            catch { }
+            return EmbeddedAssets.CharactersDir ?? external;
+        }
+
+        /// <summary>旧发布目录已有 config.ini 时沿用，避免本机设置丢失；
+        /// 单文件 exe 放在只读目录时自动落到 %LOCALAPPDATA%（SaveConfig 已有容错）。</summary>
+        string ConfigPath
+        {
+            get
+            {
+                string legacy = System.IO.Path.Combine(AppContext.BaseDirectory, "config.ini");
+                if (System.IO.File.Exists(legacy)) return legacy;
+                return EmbeddedAssets.DefaultConfigPath
+                    ?? System.IO.Path.Combine(AppContext.BaseDirectory, "config.ini");
+            }
+        }
 
         void SaveConfig()
         {
