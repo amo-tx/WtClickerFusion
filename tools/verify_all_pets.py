@@ -1,4 +1,4 @@
-"""验收：把自定义角色下拉框依次切到 8 个角色，确认每个都能加载并真正重绘。
+"""验收：把自定义角色下拉框依次切到全部可用角色，确认每个都能加载并真正重绘。
 
 用法：python tools/verify_all_pets.py <测试实例 PID> [日志路径]
 
@@ -121,9 +121,15 @@ def main():
 
     combos = [h for h in children(mainh) if "ComboBox" in klass(h)]
     print("combos:", [(hex(h), u32.SendMessageW(h, CB_GETCOUNT, 0, 0), rect(h)) for h in combos])
+    # 角色数量随 characters/ 增删变化，靠「下拉项里出现任一角色名」定位，
+    # 不再硬编码项数（旧版写死 9 = 8 角色 + 1 个「关闭」项）。
+    pet_names = [e.name for e in os.scandir(os.path.join(root, "characters")) if e.is_dir()]
     pet = None
     for h in combos:
-        if u32.SendMessageW(h, CB_GETCOUNT, 0, 0) == 9:
+        cnt = u32.SendMessageW(h, CB_GETCOUNT, 0, 0)
+        if cnt <= 1:
+            continue
+        if any(nm in [cb_item(h, i) for i in range(cnt)] for nm in pet_names):
             pet = h
             break
     if pet is None and len(combos) >= 2:
@@ -176,7 +182,7 @@ def main():
     for ln in bad:
         print("  ", ln)
         ok = False
-    print("VERDICT:", "PASS 8 个角色均可切换加载并重绘" if ok and len(sigs) == n - 1 and not bad
+    print("VERDICT:", ("PASS %d 个角色均可切换加载并重绘" % (n - 1)) if ok and len(sigs) == n - 1 and not bad
           else "FAIL 存在加载异常")
     return 0 if ok and not bad else 1
 
