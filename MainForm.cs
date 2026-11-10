@@ -8,7 +8,8 @@ namespace WtClickerGUI
     /// <summary>
     /// 主窗体（2026-10-30 UI 第二版）：
     /// - 可拉伸窗口（MinimumSize 限制，所有区域 Dock/Anchor 随窗口缩放）；
-    /// - 奶油暖色主题匹配 WuwaTappo 桌宠风格；卡片式布局，行距宽松不再拥挤；
+    /// - 双主题：默认奶油暖色，点「切换深色」一键变黑色 UI（含 DWM 标题栏），
+    ///   选择写入 config.ini 重启保持；色板集中在 UiTheme.cs；
     /// - 状态卡：当前次数 / 距下一宝箱 / 刷新倒计时 / 本次连点；
     /// - 日志深色控制台风，按级别着色，并同步落盘 WtClicker.log 便于排查。
     /// </summary>
@@ -34,11 +35,15 @@ namespace WtClickerGUI
         bool _petReady;    // 初始载入 config 期间屏蔽角色事件
         bool _lastForceLocked;   // 强制更新锁状态翻转检测
         readonly List<string> _logTail = new();   // 监控面板 /stats 的日志尾（最近 80 行）
-        RoundedButton _btnStart, _btnTest;
+        RoundedButton _btnStart, _btnTest, _btnTheme;
         Label _lblLive;
         RichTextBox _rtbLog;
         FusionBridge _bridge;
         bool _fusionLaunched;
+        // ---- 主题：_baseFg 记录控件创建时的浅色基准前景色，切换主题时按语义重映射
+        readonly Dictionary<Control, Color> _baseFg = new();
+        RoundedPanel _cfgPanel, _logCard;
+        Panel _btnPanel, _logScrollCover;   // 盖住 RichTextBox 的系统浅色滚动条滑块
 
         /// <summary>接入精确状态桥：桌宠每秒推来的服务器时钟状态直接喂给引擎。
         /// ApplyPrecise 内部加锁、不触碰 UI，因此可直接在线程池线程调用。</summary>
@@ -69,13 +74,14 @@ namespace WtClickerGUI
                 AppendLog("● 融合桌宠未启动：本次以原 OCR 模式运行（原有识别与调度逻辑完整保留）");
         }
 
-        // ---- 主题色
-        static readonly Color Ink = Color.FromArgb(74, 52, 35);        // 深棕（主文字）
-        static readonly Color InkSoft = Color.FromArgb(156, 139, 117); // 浅棕（次要文字）
-        static readonly Color Accent = Color.FromArgb(185, 106, 60);   // 焦糖橙（主按钮）
-        static readonly Color AccentDark = Color.FromArgb(158, 87, 45);
-        static readonly Color Border_ = Color.FromArgb(232, 220, 198); // 卡片描边
-        static readonly Color PageBg = Color.FromArgb(246, 241, 231);  // 页面底色
+        // ---- 控件创建时的浅色基准色（写死在布局代码里，供 _baseFg 记录语义角色）。
+        //     运行时动态取色一律走 UiTheme.P，切换主题才会即时生效。
+        static readonly Color Ink = UiTheme.Light.Ink;
+        static readonly Color InkSoft = UiTheme.Light.InkSoft;
+        static readonly Color Accent = UiTheme.Light.Accent;
+        static readonly Color AccentDark = UiTheme.Light.AccentHover;
+        static readonly Color Border_ = UiTheme.Light.Border;
+        static readonly Color PageBg = UiTheme.Light.PageBg;
 
         public MainForm()
         {
@@ -123,6 +129,7 @@ namespace WtClickerGUI
                 Dock = DockStyle.Top, Height = 360,
                 BackColor = Color.White, BorderColor = Border_, Padding = new Padding(18, 14, 18, 10)
             };
+            _cfgPanel = cfg;
             cfg.Controls.Add(MkLabel("最快速率上限", 18, 22, cfg, Ink, 9.5F, bold: true));
             _numCps = new NumericUpDown
             {
@@ -242,6 +249,7 @@ namespace WtClickerGUI
 
             // ================= 按钮行（Dock=Top） =================
             var btnPanel = new Panel { Dock = DockStyle.Top, Height = 96, BackColor = PageBg };
+            _btnPanel = btnPanel;
             _btnStart = new RoundedButton
             {
                 Text = "开始连点",
@@ -266,6 +274,20 @@ namespace WtClickerGUI
             _btnTest.Click += BtnTest_Click;
             btnPanel.Controls.Add(_btnTest);
 
+            // 一键切换 UI 风格：点击即换肤 + 写 config.ini，重启后保持上次选择
+            _btnTheme = new RoundedButton
+            {
+                Text = "切换深色",
+                Location = new Point(340, 8),
+                Size = new Size(140, 48),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left,
+                Base = Color.FromArgb(240, 233, 219), Hover = Color.FromArgb(230, 220, 200),
+                Press = Color.FromArgb(220, 208, 184),
+                ForeColor = Ink
+            };
+            _btnTheme.Click += (s, e) => ToggleTheme();
+            btnPanel.Controls.Add(_btnTheme);
+
             _lblLive = new Label
             {
                 Text = "待机中 — 启动 Wuwa Tappo 后点「测试一次」确认注入有效，再「开始连点」",
@@ -283,6 +305,7 @@ namespace WtClickerGUI
                 BackColor = Color.FromArgb(43, 36, 30), BorderColor = Border_,
                 Padding = new Padding(12)
             };
+            _logCard = logCard;
             _rtbLog = new RichTextBox
             {
                 Dock = DockStyle.Fill,
@@ -295,6 +318,13 @@ namespace WtClickerGUI
                 ScrollBars = RichTextBoxScrollBars.Vertical
             };
             logCard.Controls.Add(_rtbLog);
+            // RichTextBox 的垂直滚动条滑块由系统绘制，在深色日志底上是一条刺眼的纯白竖块，
+            // 且无法通过 BackColor 改色。用一条同底色的窄面板盖住；滚轮与 ScrollToCaret
+            // 的自动滚动照常工作，只是不再显示可拖动的滑块。
+            _logScrollCover = new Panel { BackColor = Color.FromArgb(43, 36, 30), Width = 18 };
+            logCard.Controls.Add(_logScrollCover);
+            _logScrollCover.BringToFront();
+            logCard.Resize += (s, e) => PositionLogScrollCover();
 
             // Dock 加载顺序：Fill 最先加，Top 依次加（后加的在更外侧）
             Controls.Add(logCard);
@@ -302,6 +332,7 @@ namespace WtClickerGUI
             Controls.Add(cfg);
             Controls.Add(statTable);
             Controls.Add(_header);
+            CaptureBaseColors(this);   // 记录浅色基准前景色，主题切换时按语义重映射
 
             // ---- 引擎日志回调（按内容分级着色，marshal 到 UI 线程；同步落盘便于排查）
             _engine.Log = s => BeginInvoke(() => AppendLog(s));
@@ -380,6 +411,8 @@ namespace WtClickerGUI
                 Size = new Size((int)(860 * factor), (int)(966 * factor));
                 MinimumSize = new Size((int)(860 * factor), (int)(966 * factor));
             }
+            // 句柄已创建：套用 config.ini 里保存的主题，并同步 DWM 标题栏明暗
+            ApplyTheme();
             // 角色窗口必须在 DPI 缩放完成后创建：Place() 用 Screen 物理像素定位
             _petReady = true;
             ApplyPet();
@@ -424,6 +457,130 @@ namespace WtClickerGUI
 
         string CpsText() => $"{_numCps.Value:0.#} CPS（上限）";
 
+        // ---------------------------------------------------------------- UI 主题（一键切换）
+        /// <summary>覆盖条直接贴 RichTextBox 右内侧（不猜 Padding），按 DPI 加宽到能盖住
+        /// 系统滚动条；实测 150% DPI 下滚动条距右边缘约 25px，固定 18px 会完全盖不住。</summary>
+        void PositionLogScrollCover()
+        {
+            if (_logCard == null || _logScrollCover == null || _rtbLog == null) return;
+            int w = Math.Min(Math.Max(28, (int)(26 * DeviceDpi / 96f)), Math.Max(1, _rtbLog.Width));
+            _logScrollCover.SetBounds(_rtbLog.Right - w, _rtbLog.Top, w, Math.Max(1, _rtbLog.Height));
+            _logScrollCover.BringToFront();
+        }
+
+        static IEnumerable<Control> Walk(Control root)
+        {
+            foreach (Control c in root.Controls)
+            {
+                yield return c;
+                foreach (Control child in Walk(c)) yield return child;
+            }
+        }
+
+        /// <summary>控件创建时写死的是浅色基准色，先存档，之后每次切换都从基准重映射，
+        /// 来回切不会累积偏差（也不会把日志亮色误判成描边）。</summary>
+        void CaptureBaseColors(Control root)
+        {
+            foreach (Control c in Walk(root)) _baseFg[c] = c.ForeColor;
+        }
+
+        /// <summary>把当前主题套到整棵控件树；自绘控件只 Invalidate，Paint 时读 UiTheme.P。</summary>
+        void ApplyTheme()
+        {
+            var p = UiTheme.P;
+            BackColor = p.PageBg;
+            UiTheme.ApplyTitleBar(Handle);   // 深色主题连标题栏一起变黑
+
+            foreach (Control c in Walk(this))
+            {
+                if (c is HeaderBar || c is StatCard) { c.Invalidate(); continue; }
+                if (c is RoundedButton) { c.Invalidate(); continue; }   // ApplyButtons 统一设色
+                if (c == _rtbLog)
+                {
+                    _rtbLog.BackColor = p.LogBg;
+                    _rtbLog.ForeColor = p.LogFore;
+                    _rtbLog.Invalidate();
+                    continue;
+                }
+                if (c == _logScrollCover)
+                {
+                    c.BackColor = p.LogBg;
+                    c.Invalidate();
+                    continue;
+                }
+                if (c == _logCard)
+                {
+                    _logCard.BackColor = p.LogBg;
+                    _logCard.BorderColor = p.Border;
+                    _logCard.Invalidate();
+                    continue;
+                }
+                if (c == _cfgPanel)
+                {
+                    _cfgPanel.BackColor = p.PanelBg;
+                    _cfgPanel.BorderColor = p.Border;
+                    _cfgPanel.Invalidate();
+                    continue;
+                }
+                if (c is Label || c is CheckBox)
+                {
+                    Color baseFg = _baseFg.TryGetValue(c, out var v) ? v : c.ForeColor;
+                    c.ForeColor = UiTheme.MapFg(baseFg);
+                    c.BackColor = Color.Transparent;   // 跟随父面板，深色下不留浅色方块
+                    c.Invalidate();
+                    continue;
+                }
+                if (c is ComboBox || c is NumericUpDown)
+                {
+                    c.BackColor = p.InputBg;
+                    c.ForeColor = p.Ink;
+                    c.Invalidate();
+                    continue;
+                }
+                if (c is Panel || c is TableLayoutPanel)
+                {
+                    c.BackColor = p.PageBg;
+                    c.Invalidate();
+                }
+            }
+            PositionLogScrollCover();
+            ApplyButtons();
+            RefreshCards();   // 状态卡数值色立即按新主题重取
+        }
+
+        void ApplyButtons()
+        {
+            var p = UiTheme.P;
+            if (_engine.WantRun)
+            {
+                _btnStart.Base = p.Stop; _btnStart.Hover = p.StopHover; _btnStart.Press = p.StopPress;
+            }
+            else
+            {
+                _btnStart.Base = p.Accent; _btnStart.Hover = p.AccentHover; _btnStart.Press = p.AccentPress;
+            }
+            _btnStart.Invalidate();
+            foreach (var b in new[] { _btnTest, _btnTheme })
+            {
+                if (b == null) continue;
+                b.Base = p.SubBtn; b.Hover = p.SubBtnHover; b.Press = p.SubBtnPress;
+                b.ForeColor = p.SubBtnInk;
+                b.Invalidate();
+            }
+            if (_btnTheme != null)
+                _btnTheme.Text = UiTheme.Current == ThemeKind.Dark ? "切换浅色" : "切换深色";
+        }
+
+        void ToggleTheme()
+        {
+            UiTheme.Toggle();
+            ApplyTheme();
+            SaveConfig();     // 立即落盘，强杀进程也不会丢主题选择
+            AppendLog(UiTheme.Current == ThemeKind.Dark
+                ? "◐ 已切换到深色 UI（标题栏 / 卡片 / 设置区整体变黑，选择已保存到 config.ini）"
+                : "◐ 已切换到浅色 UI（恢复奶油暖色，选择已保存到 config.ini）", 4);
+        }
+
         // ---------------------------------------------------------------- 状态刷新
         void RefreshCards()
         {
@@ -434,31 +591,31 @@ namespace WtClickerGUI
             if (cv >= 0)
             {
                 _cardCount.Value = cv.ToString("N0");
-                _cardCount.ValueColor = fresh ? Ink : InkSoft;
+                _cardCount.ValueColor = fresh ? UiTheme.Ink : UiTheme.InkSoft;
             }
             else if (_engine.WantRun)
             {
                 // 引擎已启动但 OCR 尚未首次读到（如启动瞬间/桌宠被遮挡）——如实说明而非「—」
                 _cardCount.Value = "读取中…";
-                _cardCount.ValueColor = InkSoft;
+                _cardCount.ValueColor = UiTheme.InkSoft;
             }
             else
             {
                 _cardCount.Value = "—";
-                _cardCount.ValueColor = InkSoft;
+                _cardCount.ValueColor = UiTheme.InkSoft;
             }
 
             int queued = _engine.QueuedBubbles;
             if (queued > 0)
             {
                 _cardNeed.Value = $"{queued} 个排队 ✓";
-                _cardNeed.ValueColor = Color.FromArgb(96, 150, 90);
+                _cardNeed.ValueColor = UiTheme.Good;
             }
             else
             {
                 int need = _engine.NeededClicks;
                 _cardNeed.Value = need < 0 ? "—" : need == 0 ? "已攒够 ✓" : $"还需 {need:N0} 次";
-                _cardNeed.ValueColor = need == 0 ? Color.FromArgb(96, 150, 90) : Ink;
+                _cardNeed.ValueColor = need == 0 ? UiTheme.Good : UiTheme.Ink;
             }
 
             double cd = _engine.CdRemain;
@@ -468,21 +625,23 @@ namespace WtClickerGUI
                 string R = TimeSpan.FromSeconds(_engine.RightRemSec).ToString(@"mm\:ss");
                 _cardCd.Caption = "双槽倒计时（精确桥）";
                 _cardCd.Value = $"{L} / {R}";
-                _cardCd.ValueColor = Color.FromArgb(96, 150, 90);
+                _cardCd.ValueColor = UiTheme.Good;
             }
             else
             {
                 _cardCd.Caption = "宝箱倒计时（OCR 回退）";
                 _cardCd.Value = cd < 0 ? "无" : TimeSpan.FromSeconds(cd).ToString(@"mm\:ss");
-                _cardCd.ValueColor = cd < 0 ? InkSoft : Color.FromArgb(196, 106, 72);
+                _cardCd.ValueColor = cd < 0 ? UiTheme.InkSoft : UiTheme.Warn;
             }
 
             _cardStat.Value = $"{_engine.Clicks:N0} · {_engine.Chests}";
+            // 这张卡原来从不设颜色，深色主题下会一直停留在浅色基准的深棕字（几乎不可读）
+            _cardStat.ValueColor = UiTheme.Ink;
 
             // 实时点击速率：4s 滑窗真实值（暂停/宝箱点击期间趋 0，全速期≈上限）
             double acps = _engine.ActualCps;
             _cardRate.Value = acps < 0.05 ? "0 /s" : $"{acps:F1} /s";
-            _cardRate.ValueColor = acps < 0.05 ? InkSoft : Color.FromArgb(96, 150, 90);
+            _cardRate.ValueColor = acps < 0.05 ? UiTheme.InkSoft : UiTheme.Good;
 
             // 状态行：引擎运行时显示与心跳日志同格式的实时快照（引擎 ~0.4-0.5s 重建，
             // 此处 300ms 同步），待机/未启动时回退到桌宠检测状态文本
@@ -509,14 +668,14 @@ namespace WtClickerGUI
             int level = forcedLevel >= 0 ? forcedLevel : Classify(s);
             Color c = level switch
             {
-                0 => Color.FromArgb(232, 220, 198),   // 普通
+                0 => UiTheme.LogFore,                 // 普通（跟随主题，日志底两套都保持深色）
                 1 => Color.FromArgb(143, 209, 143),   // 成功
                 2 => Color.FromArgb(240, 179, 87),    // 警告
                 3 => Color.FromArgb(242, 126, 126),   // 错误
-                _ => Color.FromArgb(167, 155, 138),   // 暗淡提示
+                _ => Color.FromArgb(182, 173, 160),   // 暗淡提示（深色底上提亮）
             };
             _rtbLog.SelectionStart = _rtbLog.TextLength;
-            _rtbLog.SelectionColor = Color.FromArgb(122, 110, 96);
+            _rtbLog.SelectionColor = UiTheme.Timestamp;
             _rtbLog.AppendText($"[{DateTime.Now:HH:mm:ss}] ");
             _rtbLog.SelectionColor = c;
             _rtbLog.AppendText(s + "\n");
@@ -652,6 +811,7 @@ namespace WtClickerGUI
                 petRenderSkips = _petWin?.RenderSkips ?? 0L,
                 petCachedFrames = _petWin?.CachedFrames ?? 0,
                 charLibCached = _charLib?.CachedCount ?? 0,
+                theme = UiTheme.Current == ThemeKind.Dark ? "dark" : "light",  // 验收用：当前 UI 风格
                 log = _bridge?.LogTail?.Invoke() ?? Array.Empty<string>(),
             };
             return System.Text.Json.JsonSerializer.Serialize(obj);
@@ -704,6 +864,7 @@ namespace WtClickerGUI
                     "petDrag=" + _chkPetDrag.Checked,
                     "petRealInput=" + _chkPetRealInput.Checked,
                     "webviewGuard=" + WebViewGuard.Enabled,
+                    "theme=" + (UiTheme.Current == ThemeKind.Dark ? "dark" : "light"),
                 });
             }
             catch { /* 落盘失败不影响运行 */ }
@@ -744,6 +905,10 @@ namespace WtClickerGUI
                         case "petDrag" when bool.TryParse(v, out bool pd): _chkPetDrag.Checked = pd; break;
                         case "petRealInput" when bool.TryParse(v, out bool pri): _chkPetRealInput.Checked = pri; break;
                         case "webviewGuard" when bool.TryParse(v, out bool wg): WebViewGuard.Enabled = wg; break;
+                        case "theme":
+                            UiTheme.Set(v.Equals("dark", StringComparison.OrdinalIgnoreCase)
+                                ? ThemeKind.Dark : ThemeKind.Light);
+                            break;
                     }
                 }
             }
@@ -758,9 +923,7 @@ namespace WtClickerGUI
                 _engine.WantRun = true;
                 if (!_engine.Started) { _engine.Start(); _engine.Started = true; }
                 _btnStart.Text = "停止";
-                _btnStart.Base = Color.FromArgb(169, 84, 74);
-                _btnStart.Hover = Color.FromArgb(150, 70, 60);
-                _btnStart.Press = Color.FromArgb(130, 60, 52);
+                ApplyButtons();     // 运行态按钮配色按当前主题取
                 AppendLog($"▶ 已开始：最快速率 {_engine.Cps:0.#} CPS（实际速率由调度自动决定），通道={_cmbChannel.Text}，" +
                           $"自动宝箱={(_engine.AutoChest ? "开" : "关")}");
             }
@@ -768,8 +931,7 @@ namespace WtClickerGUI
             {
                 _engine.WantRun = false;
                 _btnStart.Text = "开始连点";
-                _btnStart.Base = Accent; _btnStart.Hover = AccentDark;
-                _btnStart.Press = Color.FromArgb(136, 73, 36);
+                ApplyButtons();
                 AppendLog("⏸ 已停止");
             }
         }
@@ -808,13 +970,7 @@ namespace WtClickerGUI
         static readonly Font TitleFont = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold);
         static readonly Font SubFont = new Font("Microsoft YaHei UI", 9F);
         static readonly Font StatusFont = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
-        static readonly SolidBrush BgBrush = new SolidBrush(Color.FromArgb(251, 247, 239));
-        static readonly Pen LinePen = new Pen(Color.FromArgb(234, 223, 200));
-        static readonly SolidBrush InkBrush = new SolidBrush(Color.FromArgb(107, 66, 38));
-        static readonly SolidBrush SubBrush = new SolidBrush(Color.FromArgb(156, 139, 117));
-        static readonly SolidBrush OkBrush = new SolidBrush(Color.FromArgb(106, 176, 96));
-        static readonly SolidBrush BadBrush = new SolidBrush(Color.FromArgb(205, 120, 100));
-        static readonly Pen RingPen = new Pen(Color.FromArgb(185, 106, 60), 2F);
+        // 画刷/画笔由 UiTheme 的两套色板预创建并复用；Paint 时按当前主题取，切换零分配
 
         public HeaderBar()
         {
@@ -825,19 +981,20 @@ namespace WtClickerGUI
                 var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                g.FillRectangle(BgBrush, ClientRectangle);
-                g.DrawLine(LinePen, 0, Height - 1, Width, Height - 1);
+                var p = UiTheme.P;
+                g.FillRectangle(p.HeaderBgBrush, ClientRectangle);
+                g.DrawLine(p.LinePen, 0, Height - 1, Width, Height - 1);
 
-                g.DrawString("WuwaTappo 连点器", TitleFont, InkBrush, new PointF(8, 16));
+                g.DrawString("WuwaTappo 连点器", TitleFont, p.InkBrush, new PointF(8, 16));
                 g.DrawString("次数识别 · 倒计时智能调度 · 宝箱立即开启 · 不占用鼠标",
-                    SubFont, SubBrush, new PointF(10, 56));
+                    SubFont, p.SubBrush, new PointF(10, 56));
 
                 // 右侧状态：圆点 + 文字
                 float tw = g.MeasureString(StatusText, StatusFont).Width;
                 int dotX = Math.Max(220, Width - 28 - (int)tw);
-                g.FillEllipse(Ok ? OkBrush : BadBrush, dotX, 32, 12, 12);
-                if (_running) g.DrawEllipse(RingPen, dotX - 4, 28, 20, 20);
-                g.DrawString(StatusText, StatusFont, InkBrush, new PointF(dotX + 18, 28));
+                g.FillEllipse(Ok ? p.OkBrush : p.BadBrush, dotX, 32, 12, 12);
+                if (_running) g.DrawEllipse(p.RingPen, dotX - 4, 28, 20, 20);
+                g.DrawString(StatusText, StatusFont, p.InkBrush, new PointF(dotX + 18, 28));
             };
         }
 
@@ -854,7 +1011,7 @@ namespace WtClickerGUI
     {
         public string Caption = "";
         string _value = "—";
-        Color _valueColor = Color.FromArgb(74, 52, 35);
+        Color _valueColor = UiTheme.Light.Ink;
         // 必须是属性并在变化时 Invalidate：UI 定时器每 100ms 只改字段不重绘的话，
         // 卡片会停留在旧画面上（曾致卡片数字滞后状态行十几秒、启动后长时间不显示）
         public string Value
@@ -871,9 +1028,6 @@ namespace WtClickerGUI
         // 与 HeaderBar 同理：字体/底色描边固定，进程级复用；只有数值颜色是动态的。
         static readonly Font CaptionFont = new Font("Microsoft YaHei UI", 8.25F);
         static readonly Font ValueFont = new Font("Microsoft YaHei UI", 13.5F, FontStyle.Bold);
-        static readonly SolidBrush CardBrush = new SolidBrush(Color.White);
-        static readonly Pen CardPen = new Pen(Color.FromArgb(232, 220, 198));
-        static readonly SolidBrush CaptionBrush = new SolidBrush(Color.FromArgb(156, 139, 117));
 
         public StatCard()
         {
@@ -886,10 +1040,10 @@ namespace WtClickerGUI
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 var r = new Rectangle(0, 0, Width - 1, Height - 1);
                 using var path = Gfx.Round(r, 12);
-                g.FillPath(CardBrush, path);
-                g.DrawPath(CardPen, path);
+                g.FillPath(UiTheme.P.CardBrush, path);
+                g.DrawPath(UiTheme.P.CardPen, path);
 
-                g.DrawString(Caption, CaptionFont, CaptionBrush, new PointF(14, 10));
+                g.DrawString(Caption, CaptionFont, UiTheme.P.CaptionBrush, new PointF(14, 10));
                 var sz = g.MeasureString(Value, ValueFont);
                 using (var vb = new SolidBrush(ValueColor))
                     g.DrawString(Value, ValueFont, vb, new PointF(14, Height - sz.Height - 9));
@@ -900,7 +1054,7 @@ namespace WtClickerGUI
     /// <summary>白色圆角面板</summary>
     internal class RoundedPanel : Panel
     {
-        public Color BorderColor = Color.FromArgb(232, 220, 198);
+        public Color BorderColor = UiTheme.Light.Border;   // ApplyTheme 会按当前主题覆盖
         public RoundedPanel()
         {
             DoubleBuffered = true;
@@ -919,9 +1073,10 @@ namespace WtClickerGUI
     /// <summary>圆角按钮（焦糖橙主按钮 / 米色次按钮）</summary>
     internal class RoundedButton : Control
     {
-        public Color Base = Color.FromArgb(185, 106, 60);
-        public Color Hover = Color.FromArgb(158, 87, 45);
-        public Color Press = Color.FromArgb(136, 73, 36);
+        public Color Base = UiTheme.Light.Accent;
+        public Color Hover = UiTheme.Light.AccentHover;
+        public Color Press = UiTheme.Light.AccentPress;
+        static readonly Font ButtonFont = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Bold);
         bool _hot, _down;
 
         public RoundedButton()
@@ -943,14 +1098,14 @@ namespace WtClickerGUI
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             var r = new Rectangle(0, 0, Width - 1, Height - 1);
             using var path = Gfx.Round(r, 12);
-            Color c = !Enabled ? Color.FromArgb(210, 202, 188) : _down ? Press : _hot ? Hover : Base;
+            Color c = !Enabled ? UiTheme.P.Disabled : _down ? Press : _hot ? Hover : Base;
             using (var b = new SolidBrush(c)) g.FillPath(b, path);
             var textColor = Enabled ? (ForeColor == Color.FromArgb(0, 0, 0) ? Color.White : ForeColor)
-                                    : Color.FromArgb(150, 140, 125);
-            var f = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Bold);
-            var sz = g.MeasureString(Text, f);
-            g.DrawString(Text, f, new SolidBrush(textColor),
-                new PointF((Width - sz.Width) / 2f, (Height - sz.Height) / 2f));
+                                    : UiTheme.P.DisabledInk;
+            var sz = g.MeasureString(Text, ButtonFont);
+            using (var tb = new SolidBrush(textColor))
+                g.DrawString(Text, ButtonFont, tb,
+                    new PointF((Width - sz.Width) / 2f, (Height - sz.Height) / 2f));
         }
     }
 

@@ -41,6 +41,7 @@ namespace WtClickerGUI
             "maxCps=10", "autoChest=True", "humanize=True", "pacedBubble=True",
             "channel=0", "petName=娜波摩", "petEnabled=True", "petScale=0.6",
             "petPos=0", "petDrag=False", "petRealInput=True", "webviewGuard=True",
+            "theme=light",     // light=奶油暖色 / dark=黑色；也可在界面点「切换深色」一键换
         };
 
         public static void Ensure()

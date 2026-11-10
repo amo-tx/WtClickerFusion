@@ -12,7 +12,7 @@
 
 到 **[Releases / 最新版](https://github.com/amo-tx/WtClickerFusion/releases/latest)** 下载 **`WtClickerFusion.exe`**（约 167 MB，Windows 10/11 x64）：
 
-> **当前版本 `v1.1.2`**（2026-11-11 性能优化版，`SHA256` 前 16 位 `7bf4139c6f9df26e`，文件 175,056,142 B）。包含此前的黑色勾线修复、WebView2 资源治理、长按修复，以及本轮的 CPU / 内存优化。旧 tag 的源码包不含后续修复，**需要源码请用最新版 tag**。
+> **当前版本 `v1.2.0`**（2026-11-11 双主题版，`SHA256` 前 16 位 `c7b6aa985d36d3a1`，文件 175,067,406 B）。新增**一键切换黑色 UI**（含深色标题栏），并包含此前的 CPU / 内存优化、黑色勾线修复、WebView2 资源治理与长按修复。旧 tag 的源码包不含后续修复，**需要源码请用最新版 tag**。
 
 1. 下载到任意文件夹（桌面、下载目录都行）。
 2. **双击它**。
@@ -40,7 +40,7 @@
 - **停止连点**：点托盘图标退出程序。
 - **不要重复双击**：已在运行就别再开第二个，否则 48643 端口被占会回退 OCR 模式。
 
-> 历史版本：`v1.0.0` 的 zip 整合包需要解压、需要点 bat；`v1.1.0` 是首个单文件版；`v1.1.1` 是黑色勾线修复版。均已不推荐，仅作存档，请直接下最新版。
+> 历史版本：`v1.0.0` 的 zip 整合包需要解压、需要点 bat；`v1.1.0` 是首个单文件版；`v1.1.1` 是黑色勾线修复版；`v1.1.2` 是性能优化版。均已不推荐，仅作存档，请直接下最新版。
 
 ---
 
@@ -59,6 +59,34 @@
 | 真实输入同步 | `InputTapHook.cs` 全局低级键鼠钩子；真实点击/按键与注入点击共用同一个序号，PostMessage 不经过低级钩子，因此不会重复计数。**只认按键按下沿**：长按产生的自动重复消息全部吞掉，角色只在按下瞬间拍一次，松开再按才再拍 |
 | WebView2 / 内存治理 | `WebViewGuard.cs` 只对本程序拉起的那棵 `msedgewebview2` 树动手：自适应节拍（前 3 轮 10s、稳态 30s），只对空闲或工作集 ≥48MB 的进程 `EmptyWorkingSet`，空闲进程降为 `BelowNormal`，活跃 renderer/gpu/browser 保持 `Normal` 不影响桌宠响应；启动期还会对宿主自身过大的工作集瘦身一次。实测整树 **1213 MB → 约 180 MB** |
 | 单文件自包含 | `EmbeddedAssets.cs` 把角色素材从 exe 的 `WtAsset/` 资源释放到用户目录，用模块 `ModuleVersionId` 快速判断缓存是否有效（正常启动不再逐文件算 SHA256），并写入出厂默认配置 |
+| 双主题 UI | `UiTheme.cs` 提供浅色 / 黑色两套语义色板，主窗口点一次按钮即整窗换肤（含 DWM 深色标题栏），选择写入 `config.ini`，重启保持 |
+
+---
+
+## UI 主题：一键切换黑色 / 浅色
+
+按钮行第三个按钮就是开关：浅色时显示「切换深色」，黑色时显示「切换浅色」。点一下整个窗口立刻换肤，**不用重启、不影响连点与桌宠**，选择会立即写进 `config.ini`。
+
+浅色（默认，奶油暖色）：
+
+![浅色 UI](docs/ui-light.png)
+
+黑色（近黑底 + 亮焦糖强调色，标题栏同步变深）：
+
+![黑色 UI](docs/ui-dark.png)
+
+实现要点：
+
+| 位置 | 做法 |
+| --- | --- |
+| `UiTheme.cs` | 两套 `ThemePalette`（页面 / 头部 / 卡片 / 设置面板 / 输入框 / 日志 / 主次文字 / 描边 / 强调色 / 状态色），GDI+ 画刷画笔各建一次长期复用 |
+| 自绘控件 | `HeaderBar` / `StatCard` / `RoundedPanel` / `RoundedButton` 的 Paint 全部从 `UiTheme.P` 取色，切换时只 `Invalidate`；顺手修掉 `RoundedButton` 每帧 `new Font/Brush` 的泄漏 |
+| 标准控件 | `MainForm.ApplyTheme()` 遍历控件树，按创建时记录的浅色基准前景色做语义重映射；`Label` / `CheckBox` 设透明背景，深色下不留浅色方块 |
+| 标题栏 | `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)` + `SWP_FRAMECHANGED` 强制 DWM 重算非客户区，运行中切换也生效 |
+| 日志区 | 两套主题都保持深色控制台，日志分级色在两种底色上均可读；RichTextBox 的系统浅色滚动条滑块用同色窄覆盖条遮住（滚轮与自动滚动照常） |
+| 持久化 / 观测 | `config.ini` 的 `theme=dark\|light`；`GET /stats` 返回 `theme` 字段，便于无界面核验 |
+
+`tools/verify_theme.py <PID>` 会自动点击切换、抓两套截图、验证往返切换与配置落盘。
 
 ---
 
@@ -149,6 +177,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | `petName` / `petEnabled` / `petScale` / `petPos` / `petDrag` | 角色选择、缩放、位置与拖动 |
 | `petRealInput` | 真实鼠标/键盘输入是否同步驱动角色（长按不重复触发） |
 | `webviewGuard` | WebView2 资源治理开关，默认 `True`；设为 `False` 可完全关闭（可疑时用于排查） |
+| `theme` | UI 风格：`light` = 奶油暖色（默认）、`dark` = 黑色；也可直接在界面点「切换深色 / 浅色」 |
 
 ---
 
@@ -157,12 +186,12 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | 路径 | 内容 |
 | --- | --- |
 | `*.cs` / `WtClickerFusion.csproj` | 主程序源码（引擎、精确桥、OCR、注入、UI、角色窗口、自启、内嵌资源引导） |
-| `InputTapHook.cs` / `WebViewGuard.cs` | 真实键鼠按下沿计数 / WebView2 进程树资源治理 |
+| `UiTheme.cs` / `InputTapHook.cs` / `WebViewGuard.cs` | 双主题色板与 DWM 深色标题栏 / 真实键鼠按下沿计数 / WebView2 进程树资源治理 |
 | `characters/` | 5 个角色的帧图与 `character.json`（构建时编进 exe，运行时释放） |
 | `docs/` | 本 README 使用的示意图 |
 | `tools/import_nabo.py`、`strip_white_rim.py`、`white_edge_check.py` | 角色抠图、去白边、边缘复核 |
 | `tools/extract_frames.py`、`analyze_hands.py`、`hand_states.py` | 视频逐帧导出与动作相位分析 |
-| `tools/verify_*.py` | 实机验收：角色切换、动画状态机、点击同步、真实键鼠输入 |
+| `tools/verify_*.py` | 实机验收：角色切换、动画状态机、点击同步、真实键鼠输入、UI 主题往返与截图 |
 | `tools/perf-bench/` | 宝箱检测微基准（独立 .NET 控制台工程，直接链接主程序 `ChestDetector.cs`） |
 
 验收示例（`<PID>` 为运行中的进程号）：
@@ -172,6 +201,7 @@ python tools/verify_all_pets.py <PID> dist/WtClicker.log   # 全部角色切换�
 python tools/verify_nabo_states.py <PID> 30                 # 30 秒左右手交替 / 兴奋段
 python tools/verify_real_input.py <PID>                     # 真实键鼠与注入去重
 python tools/verify_long_press.py                           # 长按只触发一次 / 松开或换键仍逐次触发
+python tools/verify_theme.py <PID> dist/config.ini           # 浅↔深往返切换 + 两套 UI 截图 + 配置持久化
 dotnet run --project tools/perf-bench -c Release            # 宝箱检测 ms/帧 + MAD 黄金值
 ```
 
