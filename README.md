@@ -10,7 +10,9 @@
 
 ## 单文件版：下载一个 exe，双击即用
 
-到 **[Releases / v1.1.0](https://github.com/amo-tx/WtClickerFusion/releases/tag/v1.1.0)** 下载 **`WtClickerFusion.exe`**（约 167 MB，Windows 10/11 x64）：
+到 **[Releases / 最新版](https://github.com/amo-tx/WtClickerFusion/releases/latest)** 下载 **`WtClickerFusion.exe`**（约 167 MB，Windows 10/11 x64）：
+
+> **当前版本 `v1.1.1`**（2026-11-10 黑色勾线修复版，`SHA256` 前 16 位 `7866b83982f4c876`）。`v1.1.0` 的 exe 也已是同一修复版，但它的 tag 指向修复前源码，自动附带的源码包不含本次修复；需要源码请用 `v1.1.1`。
 
 1. 下载到任意文件夹（桌面、下载目录都行）。
 2. **双击它**。
@@ -38,7 +40,7 @@
 - **停止连点**：点托盘图标退出程序。
 - **不要重复双击**：已在运行就别再开第二个，否则 48643 端口被占会回退 OCR 模式。
 
-> 历史版本 `v1.0.0` 的 zip 整合包需要解压、需要点 bat，已不推荐使用，仅作存档。
+> 历史版本：`v1.0.0` 的 zip 整合包需要解压、需要点 bat；`v1.1.0` 是首个单文件版。两者均已不推荐，仅作存档，请直接下最新版。
 
 ---
 
@@ -138,7 +140,7 @@ python tools/verify_real_input.py <PID>                     # 真实键鼠与注
 - **精确桥补丁 `wt-fusion-bridge.js` 未包含**：它属于配套的 `Wuwatappo_Helper` 项目，负责在桌宠内部 POST 状态；没有它程序会回退到 OCR 模式。
 - **仓库内不存放二进制**：`dist/` `bin/` `obj/`、抓帧截图、源视频与云端部署脚本均由 `.gitignore` 排除（截图可能含联机玩家昵称）。编译产物只通过 Release 资产分发。
 - 单文件 exe 未做代码签名，首次运行会触发 SmartScreen / UAC，属预期行为。
-- 深色背景上白色毛球/手套周围仍可能有个别离散高光点（源素材 + GDI+ 双三次插值 overshoot），已不是连续白边。
+- 深色背景上白色毛球/手套等**内部白色区域**放大观察时仍可能有细碎高光点（源素材 + GDI+ 插值 overshoot）；外轮廓的连续白边与黑色勾线断裂已在 v6 抠图链路修复，透明区白像素已归零。
 
 ---
 
