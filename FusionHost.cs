@@ -15,6 +15,21 @@ namespace WtClickerGUI
     internal static class FusionHost
     {
         const string PetExeName = "WuwaTappo.exe";
+
+        /// <summary>
+        /// ★ 2026-11-10 A/B 实测结论（别再走这条路）：
+        ///   本机 WebView2 Runtime 157.0.4341.42 + WuwaTappo 1.0.4 **忽略**
+        ///   WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS。旧版无条件注入的
+        ///   --remote-debugging-port=9223 实测端口从未打开；这次改注入
+        ///   renderer-process-limit=2 / disable-gpu / 禁用后台网络等开关后重启，
+        ///   子进程命令行里均不出现这些开关，GPU 进程与 7 个空闲 renderer 照旧存在
+        ///   （推断桌宠创建 CoreWebView2Environment 时显式传 options 覆盖了环境变量）。
+        ///   因此资源治理改由宿主侧 WebViewGuard 完成（实测整树 ~1GB → ~174MB），
+        ///   这里只在显式 --cdp 时保留调试端口注入，不再假装能控制浏览器参数。
+        ///
+        /// 实测基线：桌宠拉起 8 个 renderer（7 个空闲）+ 1 个 gpu-process，
+        /// 整棵树 1213 MB、CPU 2.65%（16 核）、GPU 3D 引擎常驻 3.6%。
+        /// </summary>
         public static Process PetProcess;
         public static string RuntimeDir;
         public static string Status = "未启动";
@@ -68,18 +83,21 @@ namespace WtClickerGUI
                     src.CopyTo(dst);
                 }
 
-                // CDP 调试端口：无条件注入（只听回环，无风险），实机诊断用。
                 // 显式写 psi.EnvironmentVariables——提权 ShellExecute 会重建环境块、
                 // 进程级 SetEnvironmentVariable 实测传不到子进程，只有这条路可靠。
+                // ★ 旧版无条件注入 CDP 调试端口；现在只有 --cdp 才开（本机 WebView2
+                //   实测会忽略该注入，见上方类注释，不影响功能）。
                 var psi = new ProcessStartInfo(exe)
                 {
                     WorkingDirectory = RuntimeDir,
                     UseShellExecute = false,
                 };
-                psi.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--remote-debugging-port=9223";
+                if (Program.CdpMode)
+                    psi.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--remote-debugging-port=9223";
                 PetProcess = Process.Start(psi);
+                if (PetProcess != null) WebViewGuard.Start(PetProcess.Id);
                 Status = "融合桌宠已启动";
-                log?.Invoke($"✅ 已启动带精确状态桥的桌宠（{exe}），等待本地状态上报…");
+                log?.Invoke($"✅ 已启动带精确状态桥的桌宠（{exe}），等待本地状态上报…（WebView2 资源治理已挂载）");
                 return PetProcess != null;
             }
             catch (Exception ex)

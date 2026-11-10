@@ -40,7 +40,7 @@ namespace WtClickerGUI
         {
             "maxCps=10", "autoChest=True", "humanize=True", "pacedBubble=True",
             "channel=0", "petName=娜波摩", "petEnabled=True", "petScale=0.6",
-            "petPos=0", "petDrag=False", "petRealInput=True",
+            "petPos=0", "petDrag=False", "petRealInput=True", "webviewGuard=True",
         };
 
         public static void Ensure()

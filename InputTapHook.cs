@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -19,6 +20,11 @@ namespace WtClickerGUI
     ///   两个来源都只做 Interlocked 累加同一个点击序号，角色按序号奇偶
     ///   左右手交替，与官方桌宠「每次 tap 换一只手」严格同步。
     ///
+    /// ★ 2026-11-10 修复「长按某个键，角色一直拍」：只认按键的**按下沿**。
+    ///   系统自动重复会连发 WM_KEYDOWN，旧版每 90ms 放行一次等于长按=连拍；
+    ///   现在用 _held 记住当前按住的 VK，KEYUP 才释放，重复消息全部吞掉。
+    ///   打字时每个键都是新的按下沿，仍逐次驱动角色；鼠标不受影响。
+    ///
     /// ★ 钩子要求安装线程有消息循环：本类在 MainForm 构造（UI 线程）里安装，
     ///   WinForms 的 Application.Run 会持续泵消息。回调只做 Interlocked，
     ///   绝不跨线程碰 UI；异常就地兜住，避免未捕获异常终止进程。
@@ -29,7 +35,9 @@ namespace WtClickerGUI
         const int WH_KEYBOARD_LL = 13;
         const int WM_LBUTTONDOWN = 0x0201;
         const int WM_KEYDOWN = 0x0100;
+        const int WM_KEYUP = 0x0101;
         const int WM_SYSKEYDOWN = 0x0104;
+        const int WM_SYSKEYUP = 0x0105;
 
         delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -47,9 +55,14 @@ namespace WtClickerGUI
         readonly HookProc _keyProc;
         IntPtr _hMouse, _hKey;
 
-        // 键盘自动重复节流（按住一个键时系统会连发 WM_KEYDOWN ~30ms/次）
-        int _lastVk = -1;
-        long _lastKeyAt;
+        // ★ 2026-11-10 修复「长按键盘按键，自定义角色会一直触发动作」：
+        //   旧实现是「同一键每 90ms 放行一次」，但系统自动重复约 30ms 一次，
+        //   长按不放就会每 90ms Fire() 一次，角色持续拍打。
+        //   低级键盘钩子的 KBDLLHOOKSTRUCT 没有 WM_KEYDOWN 的 repeat 位，
+        //   只能自己记「哪些键当前处于按下状态」：只有按下沿算一次 tap，
+        //   KEYUP 才释放，按住期间的重复 WM_KEYDOWN 全部忽略。
+        //   钩子回调在安装的 UI 线程执行，_held 不需要加锁。
+        readonly HashSet<int> _held = new HashSet<int>();
 
         /// <summary>开关（UI 复选框控制）。关闭后真实输入不再驱动角色。</summary>
         public volatile bool Enabled = true;
@@ -86,20 +99,20 @@ namespace WtClickerGUI
 
         IntPtr OnKey(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0 && Enabled)
+            if (nCode >= 0)
             {
                 int msg = wParam.ToInt32();
-                if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+                // KBDLLHOOKSTRUCT 第一个字段是 vkCode(DWORD)，KEYDOWN/KEYUP 结构相同
+                int vk = Marshal.ReadInt32(lParam);
+                if (msg == WM_KEYUP || msg == WM_SYSKEYUP)
                 {
-                    // KBDLLHOOKSTRUCT 第一个字段是 vkCode(DWORD)
-                    int vk = Marshal.ReadInt32(lParam);
-                    long now = Environment.TickCount64;
-                    if (vk != _lastVk || now - _lastKeyAt > 90)
-                    {
-                        _lastVk = vk;
-                        _lastKeyAt = now;
-                        Fire();
-                    }
+                    // 即使开关关闭也要释放状态，否则「关着按住、开着松开」会残留幽灵按下态
+                    _held.Remove(vk);
+                }
+                else if (Enabled && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN))
+                {
+                    // Add 返回 false = 该键已按住（自动重复），直接吞掉，不触发拍打
+                    if (_held.Add(vk)) Fire();
                 }
             }
             return CallNextHookEx(_hKey, nCode, wParam, lParam);
@@ -115,6 +128,7 @@ namespace WtClickerGUI
         public void Dispose()
         {
             Enabled = false;
+            _held.Clear();
             if (_hMouse != IntPtr.Zero) { UnhookWindowsHookEx(_hMouse); _hMouse = IntPtr.Zero; }
             if (_hKey != IntPtr.Zero) { UnhookWindowsHookEx(_hKey); _hKey = IntPtr.Zero; }
         }

@@ -328,6 +328,7 @@ namespace WtClickerGUI
             FormClosing += (s, e) =>
             {
                 _uiTimer.Stop(); SaveConfig(); _engine.Shutdown();
+                WebViewGuard.Stop();
                 _inputHook?.Dispose();
                 _petWin?.Dispose(); _charLib?.DisposeAll();
             };
@@ -342,9 +343,12 @@ namespace WtClickerGUI
             _inputHook.Enabled = _chkPetRealInput.Checked;
             bool hookOk = _inputHook.Install();
             AppendLog(hookOk
-                ? "✅ 已接入全局键鼠输入：真实鼠标点击 / 键盘按键也会让自定义角色拍打（与官方桌宠逐次同步）"
+                ? "✅ 已接入全局键鼠输入：真实鼠标点击 / 键盘按键也会让自定义角色拍打（长按不重复触发）"
                 : "⚠️ 全局键鼠钩子安装失败（权限不足？）：自定义角色仅跟随注入点击",
                 hookOk ? 1 : 2);
+            AppendLog(WebViewGuard.Enabled
+                ? "● WebView2 资源治理已启用：每 20s 修剪空闲 renderer 工作集并下调其优先级（config.ini 的 webviewGuard=False 可关）"
+                : "● WebView2 资源治理已按 config.ini 关闭", 1);
             // 开机自启复选框与任务计划实际状态同步（勾选状态以系统为准，不落 config）；
             // 先赋值再解除屏蔽：赋值触发的 CheckedChanged 在屏蔽期内被忽略，不会重复注册
             _chkBoot.Checked = Autostart.Exists();
@@ -633,6 +637,11 @@ namespace WtClickerGUI
                 pet = _petWin != null && _petWin.Visible ? _cmbPet.Text : "",
                 realTaps = _inputHook?.TapCount ?? 0L,     // 真实键鼠捕获数（验收用）
                 petRealInput = _chkPetRealInput?.Checked ?? false,
+                wvGuard = WebViewGuard.Enabled,            // WebView2 资源治理（验收用）
+                wvProcs = WebViewGuard.Procs,
+                wvWsMB = WebViewGuard.WsMB,
+                wvTrimmed = WebViewGuard.Trimmed,
+                wvCycles = WebViewGuard.Cycles,
                 log = _bridge?.LogTail?.Invoke() ?? Array.Empty<string>(),
             };
             return System.Text.Json.JsonSerializer.Serialize(obj);
@@ -684,6 +693,7 @@ namespace WtClickerGUI
                     "petPos=" + _cmbPetPos.SelectedIndex,
                     "petDrag=" + _chkPetDrag.Checked,
                     "petRealInput=" + _chkPetRealInput.Checked,
+                    "webviewGuard=" + WebViewGuard.Enabled,
                 });
             }
             catch { /* 落盘失败不影响运行 */ }
@@ -723,6 +733,7 @@ namespace WtClickerGUI
                             _cmbPetPos.SelectedIndex = Math.Clamp(pp, 0, _cmbPetPos.Items.Count - 1); break;
                         case "petDrag" when bool.TryParse(v, out bool pd): _chkPetDrag.Checked = pd; break;
                         case "petRealInput" when bool.TryParse(v, out bool pri): _chkPetRealInput.Checked = pri; break;
+                        case "webviewGuard" when bool.TryParse(v, out bool wg): WebViewGuard.Enabled = wg; break;
                     }
                 }
             }

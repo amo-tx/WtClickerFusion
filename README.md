@@ -56,7 +56,8 @@
 | 开机自启 | `Autostart.cs` 注册计划任务，登录后立即开始连点 |
 | 可视化面板 | 内置 HTTP 服务：`GET /` 状态页、`GET /stats` JSON、`POST /state` 仅回环可写 |
 | 自定义角色 | `CharacterLibrary.cs` 扫描角色目录，`CharacterWindow.cs` 用 `WS_EX_LAYERED \| TRANSPARENT \| NOACTIVATE` + 预乘 alpha 渲染 |
-| 真实输入同步 | `InputTapHook.cs` 全局低级键鼠钩子；真实点击/按键与注入点击共用同一个序号，PostMessage 不经过低级钩子，因此不会重复计数 |
+| 真实输入同步 | `InputTapHook.cs` 全局低级键鼠钩子；真实点击/按键与注入点击共用同一个序号，PostMessage 不经过低级钩子，因此不会重复计数。**只认按键按下沿**：长按产生的自动重复消息全部吞掉，角色只在按下瞬间拍一次，松开再按才再拍 |
+| WebView2 资源治理 | `WebViewGuard.cs` 每 20s 只对本程序拉起的那棵 `msedgewebview2` 树做工作集瘦身（`EmptyWorkingSet`），空闲进程顺带降为 `BelowNormal`；活跃 renderer/gpu/browser 保持 `Normal` 不影响桌宠响应。实测整树 **1213 MB → 约 180 MB** |
 | 单文件自包含 | `EmbeddedAssets.cs` 把角色素材从 exe 的 `WtAsset/` 资源释放到用户目录，并写入出厂默认配置 |
 
 ---
@@ -109,7 +110,8 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | `autoChest` / `humanize` / `pacedBubble` | 宝箱秒领、拟人抖动、气泡节奏 |
 | `channel` | 注入通道，`0` = 自动 |
 | `petName` / `petEnabled` / `petScale` / `petPos` / `petDrag` | 角色选择、缩放、位置与拖动 |
-| `petRealInput` | 真实鼠标/键盘输入是否同步驱动角色 |
+| `petRealInput` | 真实鼠标/键盘输入是否同步驱动角色（长按不重复触发） |
+| `webviewGuard` | WebView2 资源治理开关，默认 `True`；设为 `False` 可完全关闭（可疑时用于排查） |
 
 ---
 
@@ -118,6 +120,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | 路径 | 内容 |
 | --- | --- |
 | `*.cs` / `WtClickerFusion.csproj` | 主程序源码（引擎、精确桥、OCR、注入、UI、角色窗口、自启、内嵌资源引导） |
+| `InputTapHook.cs` / `WebViewGuard.cs` | 真实键鼠按下沿计数 / WebView2 进程树资源治理 |
 | `characters/` | 5 个角色的帧图与 `character.json`（构建时编进 exe，运行时释放） |
 | `docs/` | 本 README 使用的示意图 |
 | `tools/import_nabo.py`、`strip_white_rim.py`、`white_edge_check.py` | 角色抠图、去白边、边缘复核 |
@@ -130,6 +133,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 python tools/verify_all_pets.py <PID> dist/WtClicker.log   # 全部角色切换重绘
 python tools/verify_nabo_states.py <PID> 30                 # 30 秒左右手交替 / 兴奋段
 python tools/verify_real_input.py <PID>                     # 真实键鼠与注入去重
+python tools/verify_long_press.py                           # 长按只触发一次 / 松开或换键仍逐次触发
 ```
 
 ---
@@ -139,6 +143,7 @@ python tools/verify_real_input.py <PID>                     # 真实键鼠与注
 - **`payload/payload.exe` 未包含在源码里**：它是打了精确状态桥补丁的官方桌宠程序，作为 `EmbeddedResource` 内嵌进单文件 exe，属于第三方二进制。没有它 `dotnet publish` 会缺资源；Release 的单文件 exe 已包含成品。
 - **精确桥补丁 `wt-fusion-bridge.js` 未包含**：它属于配套的 `Wuwatappo_Helper` 项目，负责在桌宠内部 POST 状态；没有它程序会回退到 OCR 模式。
 - **仓库内不存放二进制**：`dist/` `bin/` `obj/`、抓帧截图、源视频与云端部署脚本均由 `.gitignore` 排除（截图可能含联机玩家昵称）。编译产物只通过 Release 资产分发。
+- **不要再用 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 调浏览器参数**：本机 WebView2 Runtime 157 + WuwaTappo 1.0.4 实测完全忽略该环境变量（`--remote-debugging-port=9223` 端口从未打开，`renderer-process-limit` / `--disable-gpu` 重启后子进程命令行里也不出现，GPU 进程与空闲 renderer 数量不变）。资源占用改由宿主侧 `WebViewGuard.cs` 处理；`--cdp` 端口不开放属预期，不是配置错误。
 - 单文件 exe 未做代码签名，首次运行会触发 SmartScreen / UAC，属预期行为。
 - 深色背景上白色毛球/手套等**内部白色区域**放大观察时仍可能有细碎高光点（源素材 + GDI+ 插值 overshoot）；外轮廓的连续白边与黑色勾线断裂已在 v6 抠图链路修复，透明区白像素已归零。
 
