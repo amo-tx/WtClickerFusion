@@ -266,6 +266,30 @@ namespace WtClickerGUI
             return frames;
         }
 
+        /// <summary>当前常驻的角色帧缓存数（验收用）。</summary>
+        public int CachedCount => _cache.Count;
+
+        /// <summary>
+        /// 只保留正在显示的角色帧。旧实现把每一次切换过的角色都永久留在
+        /// _cache 里：5 个角色 × 18 帧 × 581×619×4 ≈ 130MB+ 解码位图常驻，
+        /// 切回时却几乎不省时间（用户切换是低频操作）。
+        /// ★ 必须在 CharacterWindow.LoadCharacter 之后调用：那时窗口的 _frames
+        ///   已指向新角色，且窗口用的是自己预渲染的 HBITMAP 副本，旧 Bitmap
+        ///   不再被引用，释放安全。
+        /// </summary>
+        public int ReleaseExcept(string keepName)
+        {
+            int freed = 0;
+            foreach (var kv in _cache.ToArray())
+            {
+                if (string.Equals(kv.Key, keepName, StringComparison.OrdinalIgnoreCase)) continue;
+                kv.Value.Dispose();
+                _cache.Remove(kv.Key);
+                freed++;
+            }
+            return freed;
+        }
+
         public void DisposeAll()
         {
             foreach (var f in _cache.Values) f.Dispose();

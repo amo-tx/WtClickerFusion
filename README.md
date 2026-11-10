@@ -12,7 +12,7 @@
 
 到 **[Releases / 最新版](https://github.com/amo-tx/WtClickerFusion/releases/latest)** 下载 **`WtClickerFusion.exe`**（约 167 MB，Windows 10/11 x64）：
 
-> **当前版本 `v1.1.1`**（2026-11-10 黑色勾线修复版，`SHA256` 前 16 位 `7866b83982f4c876`）。`v1.1.0` 的 exe 也已是同一修复版，但它的 tag 指向修复前源码，自动附带的源码包不含本次修复；需要源码请用 `v1.1.1`。
+> **当前版本 `v1.1.2`**（2026-11-11 性能优化版，`SHA256` 前 16 位 `7bf4139c6f9df26e`，文件 175,056,142 B）。包含此前的黑色勾线修复、WebView2 资源治理、长按修复，以及本轮的 CPU / 内存优化。旧 tag 的源码包不含后续修复，**需要源码请用最新版 tag**。
 
 1. 下载到任意文件夹（桌面、下载目录都行）。
 2. **双击它**。
@@ -40,7 +40,7 @@
 - **停止连点**：点托盘图标退出程序。
 - **不要重复双击**：已在运行就别再开第二个，否则 48643 端口被占会回退 OCR 模式。
 
-> 历史版本：`v1.0.0` 的 zip 整合包需要解压、需要点 bat；`v1.1.0` 是首个单文件版。两者均已不推荐，仅作存档，请直接下最新版。
+> 历史版本：`v1.0.0` 的 zip 整合包需要解压、需要点 bat；`v1.1.0` 是首个单文件版；`v1.1.1` 是黑色勾线修复版。均已不推荐，仅作存档，请直接下最新版。
 
 ---
 
@@ -57,8 +57,45 @@
 | 可视化面板 | 内置 HTTP 服务：`GET /` 状态页、`GET /stats` JSON、`POST /state` 仅回环可写 |
 | 自定义角色 | `CharacterLibrary.cs` 扫描角色目录，`CharacterWindow.cs` 用 `WS_EX_LAYERED \| TRANSPARENT \| NOACTIVATE` + 预乘 alpha 渲染 |
 | 真实输入同步 | `InputTapHook.cs` 全局低级键鼠钩子；真实点击/按键与注入点击共用同一个序号，PostMessage 不经过低级钩子，因此不会重复计数。**只认按键按下沿**：长按产生的自动重复消息全部吞掉，角色只在按下瞬间拍一次，松开再按才再拍 |
-| WebView2 资源治理 | `WebViewGuard.cs` 每 20s 只对本程序拉起的那棵 `msedgewebview2` 树做工作集瘦身（`EmptyWorkingSet`），空闲进程顺带降为 `BelowNormal`；活跃 renderer/gpu/browser 保持 `Normal` 不影响桌宠响应。实测整树 **1213 MB → 约 180 MB** |
-| 单文件自包含 | `EmbeddedAssets.cs` 把角色素材从 exe 的 `WtAsset/` 资源释放到用户目录，并写入出厂默认配置 |
+| WebView2 / 内存治理 | `WebViewGuard.cs` 只对本程序拉起的那棵 `msedgewebview2` 树动手：自适应节拍（前 3 轮 10s、稳态 30s），只对空闲或工作集 ≥48MB 的进程 `EmptyWorkingSet`，空闲进程降为 `BelowNormal`，活跃 renderer/gpu/browser 保持 `Normal` 不影响桌宠响应；启动期还会对宿主自身过大的工作集瘦身一次。实测整树 **1213 MB → 约 180 MB** |
+| 单文件自包含 | `EmbeddedAssets.cs` 把角色素材从 exe 的 `WtAsset/` 资源释放到用户目录，用模块 `ModuleVersionId` 快速判断缓存是否有效（正常启动不再逐文件算 SHA256），并写入出厂默认配置 |
+
+---
+
+## 性能优化（v1.1.2）
+
+本轮针对「常驻 CPU」与「多角色切换后的内存」做了 5 处优化，全部保持行为等价：宝箱 MAD 黄金值、点击同步相位、动画状态机、真实键鼠按下沿均逐项回归验收通过。
+
+| 优化点 | 做法 |
+| --- | --- |
+| 宝箱模板匹配 | `ChestDetector.cs` 把掩码内采样点预展开成扁平表，并用**严格安全的上界早停**：累加和 `sum > cutoff × N × 3` 时该位置不可能刷新最优 MAD，直接丢弃；初始上界取判定阈值，第一轮就能剪枝。检测结果与原实现逐位一致 |
+| 角色窗口渲染 | `CharacterWindow.cs` 按缩放一次性把 18 帧预渲染成 32bppPArgb 的 `HBITMAP` 缓存、复用内存 DC；帧与位置都没变时整次跳过 `SetWindowPos` / `UpdateLayeredWindow`（约 1/4 tick 命中）。缓存设 96MB 上限，超限自动退回逐帧渲染 |
+| 角色素材内存 | `CharacterLibrary.cs` 改为 LRU(1)：切换角色后释放上一个角色的解码位图（窗口此时已换成自己的 HBITMAP 副本）。5 个角色轮切后 `/stats` 的 `charLibCached` 恒为 1 |
+| 启动 | `EmbeddedAssets.cs` 用模块 `ModuleVersionId` 判断内嵌素材缓存是否有效，正常启动不再把 16MB 素材全部读出来算 SHA256 |
+| UI 与治理器 | `HeaderBar` / `StatCard` 复用字体画刷（原来每次 Paint 都 `new` 且不释放），运行态翻转才 `Invalidate`；`WebViewGuard` 选择性 trim + 自适应节拍，不再每 20s 全量换出活跃进程的热页 |
+
+**可复现微基准**（`tools/perf-bench/`，1200×800 合成帧、16 轮取中位；改动前后用同一基准程序分别链接各自版本的 `ChestDetector.cs`）：
+
+| 场景 | 优化前 | 优化后 | 变化 |
+| --- | --- | --- | --- |
+| 有橙色 UI 簇、无宝箱（滑窗跑满，最坏情况） | 63.5 ms/帧 | **9.2 ms/帧** | −85% |
+| 命中宝箱 | 54.3 ms/帧 | **1.55 ms/帧** | −97% |
+| 纯黑空帧 | 0.09 ms/帧 | 0.10 ms/帧 | 持平 |
+
+4 个固定位置的 MAD 黄金值前后逐位一致（`41.271353` / `114.406652` / `42.845805` / `148.370370`），确认早停没有改变判定结果。
+
+**实机 A/B**（同一台机器、均为精确桥运行态，30 秒窗口）：
+
+| 指标 | 优化前 | v1.1.2 |
+| --- | --- | --- |
+| 主进程 CPU（单核占比） | 7.45% | 3.9% ~ 5.5%（多次窗口均值约 5.0%） |
+| 5 个角色轮切后的帧缓存 | 全部常驻（130MB+ 解码位图） | 仅 1 个角色 |
+| 启动期宿主自身瘦身 | 无 | 工作集 ~324 MB → ~146 MB（`wvSelfTrimmed=1`） |
+| WebView2 树工作集 | 103 ~ 150 MB | 144 ~ 160 MB（保持低水位） |
+
+> 工作集会随运行时长和系统内存压力被系统自然换出，短时窗口的绝对值不宜直接横比；上表以「同口径 CPU」和可复现微基准为主要依据。
+
+`GET /stats` 新增 `petRenderCalls` / `petRenderSkips` / `petCachedFrames` / `charLibCached` / `wvSkipped` / `wvSelfTrimmed`，可直接观察缓存命中与治理情况。
 
 ---
 
@@ -126,6 +163,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | `tools/import_nabo.py`、`strip_white_rim.py`、`white_edge_check.py` | 角色抠图、去白边、边缘复核 |
 | `tools/extract_frames.py`、`analyze_hands.py`、`hand_states.py` | 视频逐帧导出与动作相位分析 |
 | `tools/verify_*.py` | 实机验收：角色切换、动画状态机、点击同步、真实键鼠输入 |
+| `tools/perf-bench/` | 宝箱检测微基准（独立 .NET 控制台工程，直接链接主程序 `ChestDetector.cs`） |
 
 验收示例（`<PID>` 为运行中的进程号）：
 
@@ -134,6 +172,7 @@ python tools/verify_all_pets.py <PID> dist/WtClicker.log   # 全部角色切换�
 python tools/verify_nabo_states.py <PID> 30                 # 30 秒左右手交替 / 兴奋段
 python tools/verify_real_input.py <PID>                     # 真实键鼠与注入去重
 python tools/verify_long_press.py                           # 长按只触发一次 / 松开或换键仍逐次触发
+dotnet run --project tools/perf-bench -c Release            # 宝箱检测 ms/帧 + MAD 黄金值
 ```
 
 ---

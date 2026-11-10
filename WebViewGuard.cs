@@ -16,11 +16,13 @@ namespace WtClickerGUI
     /// 曾尝试由 FusionHost 通过 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 注入
     /// renderer-process-limit / disable-gpu 等开关，A/B 实测本机 WebView2
     /// 完全忽略（子进程命令行无该开关、GPU 进程与空闲 renderer 数量不变）。
-    /// 因此本类是唯一实际生效的手段：每 20 秒快照一次进程树，只对本程序
+    /// 因此本类是唯一实际生效的手段：按自适应节拍快照进程树，只对本程序
     /// 启动的那棵 msedgewebview2 树动手：
-    ///   1) 每轮对全树 EmptyWorkingSet，把闲置物理页换出，让工作集长期保持低水位；
-    ///   2) 只有 CPU 增量 &lt; 20ms 的空闲进程降为 BelowNormal，
-    ///      活跃 renderer / gpu / 主 browser 进程保持 Normal，不影响桌宠响应与精确桥。
+    ///   1) 对「空闲」或「工作集 ≥ 48MB」的进程 EmptyWorkingSet，把闲置物理页
+    ///      换出；活跃的小进程不动，避免刚换出的热页立刻被换入造成周期性抖动；
+    ///   2) 只有 CPU 增量 &lt; 20ms 的空闲进程降为 BelowNormal，且只在空闲状态
+    ///      翻转时改一次优先级；
+    ///   3) 前 3 轮 10s 快速收敛，稳态拉长到 30s，进一步压低治理器自身开销。
     ///
     /// EmptyWorkingSet 只是把物理页换出到页面文件，不释放提交内存、不终止进程，
     /// Windows 会在进程真正访问时自动换入，因此不会破坏桌宠或精确状态桥。
@@ -30,8 +32,11 @@ namespace WtClickerGUI
     internal static class WebViewGuard
     {
         const uint TH32CS_SNAPPROCESS = 0x00000002;
-        const int PeriodMs = 20000;
-        const double IdleCpuSeconds = 0.02;   // 20 秒周期里 CPU 时间增量 < 20ms 视为空闲
+        const int FastPeriodMs = 10000;       // 启动后前 3 轮：快速把工作集压下来
+        const int SlowPeriodMs = 30000;       // 稳态：低水位已建立，拉长间隔省 CPU
+        const int TrimMinMB = 48;             // 活跃进程只有超过这个工作集才值得换出
+        const int SelfTrimMinMB = 256;        // 宿主进程启动期冷页过多时瘦身一次
+        const double IdleCpuSeconds = 0.02;   // 一个周期里 CPU 时间增量 < 20ms 视为空闲
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         struct PROCESSENTRY32W
@@ -64,20 +69,22 @@ namespace WtClickerGUI
         static int _rootPid;
         static int _busy;
         static readonly Dictionary<int, double> _lastCpu = new Dictionary<int, double>();
+        static readonly HashSet<int> _idlePids = new HashSet<int>();
 
         /// <summary>config.ini 的 webviewGuard 可关闭（默认开）。</summary>
         public static volatile bool Enabled = true;
-        /// <summary>本周期治理的 WebView2 进程数 / 工作集合计(MB) / 累计修剪次数 / 累计周期数。</summary>
-        public static int Procs, WsMB, Trimmed, Cycles;
+        /// <summary>本周期治理的 WebView2 进程数 / 工作集合计(MB) / 累计修剪次数 / 累计周期数 / 因活跃而跳过修剪次数。</summary>
+        public static int Procs, WsMB, Trimmed, Cycles, Skipped, SelfTrimmed;
 
         /// <summary>桌宠进程 PID；RestartPet 重新拉起时会用新 PID 重置状态。</summary>
         public static void Start(int rootPid)
         {
             _rootPid = rootPid;
             _lastCpu.Clear();
-            Procs = WsMB = Trimmed = Cycles = 0;
-            if (_timer == null) _timer = new System.Threading.Timer(Cycle, null, PeriodMs, PeriodMs);
-            else _timer.Change(PeriodMs, PeriodMs);
+            _idlePids.Clear();
+            Procs = WsMB = Trimmed = Cycles = Skipped = SelfTrimmed = 0;
+            if (_timer == null) _timer = new System.Threading.Timer(Cycle, null, FastPeriodMs, FastPeriodMs);
+            else _timer.Change(FastPeriodMs, FastPeriodMs);
         }
 
         public static void Stop()
@@ -155,24 +162,63 @@ namespace WtClickerGUI
                         _lastCpu[pid] = cpu;
                         alive.Add(pid);
                         live++;
-                        try { ws += (int)(p.WorkingSet64 / (1024 * 1024)); } catch { }
+                        int wsMB = 0;
+                        try { wsMB = (int)(p.WorkingSet64 / (1024 * 1024)); ws += wsMB; } catch { }
 
-                        // 每轮全量瘦身：EmptyWorkingSet 只换出闲置物理页，活跃进程
-                        // 按需自动换回；实测精确桥/计数/动画均不受影响，内存长期低水位。
-                        try { if (EmptyWorkingSet(p.Handle)) Trimmed++; } catch { }
-                        // 只降空闲进程的优先级；活跃 renderer / gpu / browser 保持 Normal，
-                        // 避免高负载时拖慢桌宠的点击响应与状态推送。
-                        try { p.PriorityClass = idle ? ProcessPriorityClass.BelowNormal
-                                                     : ProcessPriorityClass.Normal; } catch { }
+                        // 选择性瘦身：空闲进程照常换出；活跃进程只有工作集已经偏大
+                        // 才 trim，避免把正在用的热页换出后立刻触发硬缺页回换
+                        // （旧版每 20s 全量 trim 带来的周期性 CPU/IO 尖峰）。
+                        if (idle || wsMB >= TrimMinMB)
+                        {
+                            try { if (EmptyWorkingSet(p.Handle)) Trimmed++; } catch { }
+                        }
+                        else Skipped++;
+
+                        // 只降空闲进程的优先级，且仅在空闲状态翻转时写一次，
+                        // 活跃 renderer / gpu / browser 保持 Normal 不影响响应。
+                        bool wasIdle = _idlePids.Contains(pid);
+                        if (idle != wasIdle)
+                        {
+                            try
+                            {
+                                p.PriorityClass = idle ? ProcessPriorityClass.BelowNormal
+                                                       : ProcessPriorityClass.Normal;
+                                if (idle) _idlePids.Add(pid); else _idlePids.Remove(pid);
+                            }
+                            catch { }
+                        }
                     }
                     catch { /* 进程已退出或无权限，跳过 */ }
                 }
                 foreach (int k in new List<int>(_lastCpu.Keys))
                     if (!alive.Contains(k)) _lastCpu.Remove(k);
+                foreach (int k in new List<int>(_idlePids))
+                    if (!alive.Contains(k)) _idlePids.Remove(k);
 
                 Procs = live;
                 WsMB = ws;
                 Cycles++;
+
+                // 宿主自己是压缩单文件（内嵌 78MB payload + 16MB 角色素材），
+                // 启动后 .NET 加载/解压会留下一大堆再也不会访问的冷页，工作集
+                // 实测能到 450MB。前 4 轮若仍超 256MB 就对自身做一次
+                // EmptyWorkingSet（只换出冷页、不释放提交内存），稳态不再碰，
+                // 避免影响连点主循环的响应。
+                if (Cycles <= 4)
+                {
+                    try
+                    {
+                        using var self = Process.GetCurrentProcess();
+                        if (self.WorkingSet64 / (1024 * 1024) >= SelfTrimMinMB &&
+                            EmptyWorkingSet(self.Handle)) SelfTrimmed++;
+                    }
+                    catch { }
+                }
+
+                // 前 3 轮快速收敛，之后拉长到 30s：稳态内存已低，没必要每 10s
+                // 枚举一次全系统进程树。
+                int next = Cycles < 3 ? FastPeriodMs : SlowPeriodMs;
+                try { _timer?.Change(next, next); } catch { }
             }
             catch { /* 治理器异常绝不影响连点主流程 */ }
             finally { Interlocked.Exchange(ref _busy, 0); }

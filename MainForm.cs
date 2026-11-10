@@ -489,8 +489,8 @@ namespace WtClickerGUI
             string live = _engine.StatusLine;
             if (string.IsNullOrEmpty(live)) live = _engine.LiveDesc;
             if (!string.IsNullOrEmpty(live)) _lblLive.Text = live;
+            // Running 属性内部已有脏检查，无需每 100ms 再强制 Invalidate
             _header.Running = _engine.WantRun;
-            _header.Invalidate();
         }
 
         // ---------------------------------------------------------------- 日志
@@ -584,6 +584,9 @@ namespace WtClickerGUI
 
                 // character.json 的 scale 是素材自带基准；UI 数值框是用户倍率
                 _petWin.LoadCharacter(frames, def.Scale * (double)_numPetScale.Value);
+                // 窗口已换到新帧，旧角色的解码位图可以释放，避免切换过的角色
+                // 全部常驻内存（5 个角色曾占 130MB+）。
+                _charLib.ReleaseExcept(def.Name);
                 if (!_petWin.Visible) _petWin.Show();
                 _petWin.Place(_cmbPetPos.Text);
             }
@@ -642,6 +645,13 @@ namespace WtClickerGUI
                 wvWsMB = WebViewGuard.WsMB,
                 wvTrimmed = WebViewGuard.Trimmed,
                 wvCycles = WebViewGuard.Cycles,
+                wvSkipped = WebViewGuard.Skipped,
+                wvSelfTrimmed = WebViewGuard.SelfTrimmed,
+                // 角色窗口预渲染缓存：实际合成次数 / 被帧去重跳过的次数 / 缓存帧数
+                petRenderCalls = _petWin?.RenderCalls ?? 0L,
+                petRenderSkips = _petWin?.RenderSkips ?? 0L,
+                petCachedFrames = _petWin?.CachedFrames ?? 0,
+                charLibCached = _charLib?.CachedCount ?? 0,
                 log = _bridge?.LogTail?.Invoke() ?? Array.Empty<string>(),
             };
             return System.Text.Json.JsonSerializer.Serialize(obj);
@@ -784,7 +794,27 @@ namespace WtClickerGUI
     {
         public string StatusText = "检测中…";
         public bool Ok;
-        public bool Running;
+        bool _running;
+        /// <summary>状态环只在运行态翻转时重绘；UI 定时器每 100ms 都会赋值，
+        /// 原来无条件 Invalidate 会让头部每秒白白重画 10 次。</summary>
+        public bool Running
+        {
+            get => _running;
+            set { if (_running != value) { _running = value; Invalidate(); } }
+        }
+
+        // 原 Paint 每次都 new Font/SolidBrush 且不释放：100ms 定时器下每秒
+        // 泄漏十几个 GDI+ 对象。改为进程级复用，稳定期 Paint 内零分配。
+        static readonly Font TitleFont = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold);
+        static readonly Font SubFont = new Font("Microsoft YaHei UI", 9F);
+        static readonly Font StatusFont = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
+        static readonly SolidBrush BgBrush = new SolidBrush(Color.FromArgb(251, 247, 239));
+        static readonly Pen LinePen = new Pen(Color.FromArgb(234, 223, 200));
+        static readonly SolidBrush InkBrush = new SolidBrush(Color.FromArgb(107, 66, 38));
+        static readonly SolidBrush SubBrush = new SolidBrush(Color.FromArgb(156, 139, 117));
+        static readonly SolidBrush OkBrush = new SolidBrush(Color.FromArgb(106, 176, 96));
+        static readonly SolidBrush BadBrush = new SolidBrush(Color.FromArgb(205, 120, 100));
+        static readonly Pen RingPen = new Pen(Color.FromArgb(185, 106, 60), 2F);
 
         public HeaderBar()
         {
@@ -795,30 +825,19 @@ namespace WtClickerGUI
                 var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                using var bg = new SolidBrush(Color.FromArgb(251, 247, 239));
-                g.FillRectangle(bg, ClientRectangle);
-                using var line = new Pen(Color.FromArgb(234, 223, 200));
-                g.DrawLine(line, 0, Height - 1, Width, Height - 1);
+                g.FillRectangle(BgBrush, ClientRectangle);
+                g.DrawLine(LinePen, 0, Height - 1, Width, Height - 1);
 
-                g.DrawString("WuwaTappo 连点器", new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
-                    new SolidBrush(Color.FromArgb(107, 66, 38)), new PointF(8, 16));
+                g.DrawString("WuwaTappo 连点器", TitleFont, InkBrush, new PointF(8, 16));
                 g.DrawString("次数识别 · 倒计时智能调度 · 宝箱立即开启 · 不占用鼠标",
-                    new Font("Microsoft YaHei UI", 9F),
-                    new SolidBrush(Color.FromArgb(156, 139, 117)), new PointF(10, 56));
+                    SubFont, SubBrush, new PointF(10, 56));
 
                 // 右侧状态：圆点 + 文字
-                var f = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
-                float tw = g.MeasureString(StatusText, f).Width;
+                float tw = g.MeasureString(StatusText, StatusFont).Width;
                 int dotX = Math.Max(220, Width - 28 - (int)tw);
-                using var dot = new SolidBrush(Ok ? Color.FromArgb(106, 176, 96) : Color.FromArgb(205, 120, 100));
-                g.FillEllipse(dot, dotX, 32, 12, 12);
-                if (Running)
-                {
-                    using var ring = new Pen(Color.FromArgb(185, 106, 60), 2F);
-                    g.DrawEllipse(ring, dotX - 4, 28, 20, 20);
-                }
-                g.DrawString(StatusText, f, new SolidBrush(Color.FromArgb(107, 66, 38)),
-                    new PointF(dotX + 18, 28));
+                g.FillEllipse(Ok ? OkBrush : BadBrush, dotX, 32, 12, 12);
+                if (_running) g.DrawEllipse(RingPen, dotX - 4, 28, 20, 20);
+                g.DrawString(StatusText, StatusFont, InkBrush, new PointF(dotX + 18, 28));
             };
         }
 
@@ -849,6 +868,13 @@ namespace WtClickerGUI
             set { if (_valueColor != value) { _valueColor = value; Invalidate(); } }
         }
 
+        // 与 HeaderBar 同理：字体/底色描边固定，进程级复用；只有数值颜色是动态的。
+        static readonly Font CaptionFont = new Font("Microsoft YaHei UI", 8.25F);
+        static readonly Font ValueFont = new Font("Microsoft YaHei UI", 13.5F, FontStyle.Bold);
+        static readonly SolidBrush CardBrush = new SolidBrush(Color.White);
+        static readonly Pen CardPen = new Pen(Color.FromArgb(232, 220, 198));
+        static readonly SolidBrush CaptionBrush = new SolidBrush(Color.FromArgb(156, 139, 117));
+
         public StatCard()
         {
             DoubleBuffered = true;
@@ -860,15 +886,13 @@ namespace WtClickerGUI
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 var r = new Rectangle(0, 0, Width - 1, Height - 1);
                 using var path = Gfx.Round(r, 12);
-                using (var b = new SolidBrush(Color.White)) g.FillPath(b, path);
-                using (var p = new Pen(Color.FromArgb(232, 220, 198))) g.DrawPath(p, path);
+                g.FillPath(CardBrush, path);
+                g.DrawPath(CardPen, path);
 
-                g.DrawString(Caption, new Font("Microsoft YaHei UI", 8.25F),
-                    new SolidBrush(Color.FromArgb(156, 139, 117)), new PointF(14, 10));
-                var f = new Font("Microsoft YaHei UI", 13.5F, FontStyle.Bold);
-                var sz = g.MeasureString(Value, f);
-                g.DrawString(Value, f, new SolidBrush(ValueColor),
-                    new PointF(14, Height - sz.Height - 9));
+                g.DrawString(Caption, CaptionFont, CaptionBrush, new PointF(14, 10));
+                var sz = g.MeasureString(Value, ValueFont);
+                using (var vb = new SolidBrush(ValueColor))
+                    g.DrawString(Value, ValueFont, vb, new PointF(14, Height - sz.Height - 9));
             };
         }
     }

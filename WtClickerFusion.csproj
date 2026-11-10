@@ -9,7 +9,7 @@
     <AssemblyName>WtClickerFusion</AssemblyName>
     <AssemblyTitle>WuwaTappo 融合版（精确状态桥 + 连点调度）</AssemblyTitle>
     <Product>WtClickerFusion</Product>
-    <Version>1.1.0</Version>
+    <Version>1.1.2</Version>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- 角色素材保持为发布目录下的外部 characters/ 文件夹：方便直接用 PetForge
          继续导入新角色，不必重新编译；单文件 exe 不把这些 PNG 打进包内。 -->

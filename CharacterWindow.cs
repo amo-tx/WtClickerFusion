@@ -99,6 +99,26 @@ namespace WtClickerGUI
         // 尺寸缩成 2/3；Screen.PrimaryScreen.WorkingArea 同样可能给出虚拟化尺寸。
         int _posX = 200, _posY = 200;
 
+        // ---- 预渲染缓存（2026-11-10 性能优化）----
+        // 旧 Render 每 tick 都：new Bitmap(w,h) → Graphics 双三次缩放 → GetHbitmap()
+        // 再复制一次 → 新建/销毁 2 个 DC。20fps 下每秒 60 次大位图分配，
+        // 是桌宠窗口的常驻 CPU 与 GC 压力来源。现在按 scale 把每个素材帧
+        // 预渲染成一张 32bppPArgb 的 HBITMAP 缓存起来，每 tick 只做
+        // SelectObject + UpdateLayeredWindow；帧与位置都没变则整次调用直接跳过。
+        readonly Dictionary<Bitmap, IntPtr> _hbitmapCache = new Dictionary<Bitmap, IntPtr>();
+        int _cacheW, _cacheH;
+        double _cacheScale = -1;
+        bool _cacheEnabled;
+        IntPtr _memDc = IntPtr.Zero;
+        Bitmap _lastSrc;
+        int _lastX = int.MinValue, _lastY = int.MinValue;
+        bool _lastPainted;
+        // 验收用计数（UI 线程写，HTTP /stats 线程读）
+        long _renderCalls, _renderSkips;
+        public long RenderCalls => Interlocked.Read(ref _renderCalls);
+        public long RenderSkips => Interlocked.Read(ref _renderSkips);
+        public int CachedFrames => _hbitmapCache.Count;
+
         public CharacterWindow()
         {
             FormBorderStyle = FormBorderStyle.None;
@@ -178,6 +198,7 @@ namespace WtClickerGUI
         /// <summary>载入角色并立即显示第一帧。只在 UI 线程调用。</summary>
         public void LoadCharacter(CharacterFrames frames, double scale)
         {
+            InvalidateCache();               // 换角色：旧角色的 HBITMAP 必须全部丢弃
             _frames = frames;
             _scale = Math.Clamp(scale, 0.1, 3.0);
             _frenzyChance = Math.Clamp(frames?.FrenzyChance ?? 0.0, 0.0, 1.0);
@@ -199,7 +220,10 @@ namespace WtClickerGUI
 
         public void SetScale(double scale)
         {
-            _scale = Math.Clamp(scale, 0.1, 3.0);
+            double next = Math.Clamp(scale, 0.1, 3.0);
+            if (Math.Abs(next - _scale) < 1e-9) return;
+            _scale = next;
+            InvalidateCache();
             Render(Current());
         }
 
@@ -348,21 +372,88 @@ namespace WtClickerGUI
         /// </summary>
         void StartSlap(long seq) => StartClip((seq & 1L) == 0 ? "slap_l" : "slap_r");
 
-        /// <summary>用 32bppPArgb（预乘 alpha）画布 + ULW_ALPHA 更新分层窗口。</summary>
+        /// <summary>丢弃全部预渲染位图并强制下一帧重绘（换角色 / 改缩放）。</summary>
+        void InvalidateCache()
+        {
+            foreach (var h in _hbitmapCache.Values)
+                if (h != IntPtr.Zero) DeleteObject(h);
+            _hbitmapCache.Clear();
+            _cacheScale = -1;
+            _cacheW = _cacheH = 0;
+            _cacheEnabled = false;
+            ForceRepaint();
+        }
+
+        /// <summary>窗口重新可见时缓存仍然有效，但必须重新推送一次画面。</summary>
+        void ForceRepaint() { _lastPainted = false; _lastSrc = null; }
+
+        void EnsureDevice(IntPtr screenDc)
+        {
+            // 内存 DC 不依赖屏幕 DC 的生命周期，可以长期复用；屏幕 DC 仍按帧
+            // GetDC/ReleaseDC，避免长期持有在分辨率/显示模式切换后失效。
+            if (_memDc == IntPtr.Zero) _memDc = CreateCompatibleDC(screenDc);
+        }
+
+        /// <summary>
+        /// 一次性把当前角色的每帧按 scale 预渲染成 32bppPArgb HBITMAP。
+        /// 之后每 tick 只做 SelectObject + UpdateLayeredWindow，不再有任何
+        /// GDI+ 缩放或大位图分配。缓存以源 Bitmap 引用为 key（角色帧常驻不变）。
+        /// </summary>
+        void RebuildCache(int w, int h)
+        {
+            InvalidateCache();
+            if (_frames == null || w <= 0 || h <= 0) return;
+            int count = 0;
+            foreach (var list in _frames.Clips.Values) count += list.Count;
+            // 极端缩放（3.0x）单帧可达 13MB；设 96MB 上限，超了就退回逐帧渲染，
+            // 宁可慢一点也不让桌宠窗口吃掉几百 MB 内存。
+            _cacheEnabled = (long)count * w * h * 4 <= 96L * 1024 * 1024;
+            _cacheW = w; _cacheH = h; _cacheScale = _scale;
+            if (!_cacheEnabled) return;
+
+            foreach (var list in _frames.Clips.Values)
+                foreach (var bmp in list)
+                {
+                    if (bmp == null || _hbitmapCache.ContainsKey(bmp)) continue;
+                    using (var canvas = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
+                    {
+                        using (var g = Graphics.FromImage(canvas))
+                        {
+                            g.Clear(Color.Transparent);
+                            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                            g.DrawImage(bmp, 0, 0, w, h);
+                        }
+                        _hbitmapCache[bmp] = canvas.GetHbitmap(Color.FromArgb(0));
+                    }
+                }
+        }
+
+        /// <summary>用缓存的 32bppPArgb（预乘 alpha）画布 + ULW_ALPHA 更新分层窗口。</summary>
         void Render(Bitmap src)
         {
             if (src == null || !IsHandleCreated) return;
             int w = Math.Max(1, (int)Math.Round(src.Width * _scale));
             int h = Math.Max(1, (int)Math.Round(src.Height * _scale));
-            // Win32 物理像素定位，绕开 WinForms 的 DPI 缩放（SetBounds 实测会偏）
-            SetWindowPos(Handle, IntPtr.Zero, _posX, _posY, w, h,
-                SWP_NOZORDER | SWP_NOACTIVATE);
+            bool rebuild = w != _cacheW || h != _cacheH || _cacheScale < 0
+                           || Math.Abs(_scale - _cacheScale) > 1e-9;
+            if (rebuild) RebuildCache(w, h);
+            bool moved = _posX != _lastX || _posY != _lastY;
 
-            IntPtr screenDc = GetDC(IntPtr.Zero);
-            IntPtr memDc = CreateCompatibleDC(screenDc);
-            IntPtr hbmp = IntPtr.Zero, oldBmp = IntPtr.Zero;
-            try
+            // 帧与位置都没变 → 屏幕内容完全一致，跳过 SetWindowPos、
+            // 合成与 UpdateLayeredWindow。idle 每 2 tick 才换一帧、高 CPS 下
+            // 反复重播同一张首帧，都会命中这里。
+            if (!moved && _lastPainted && ReferenceEquals(src, _lastSrc))
             {
+                Interlocked.Increment(ref _renderSkips);
+                return;
+            }
+
+            IntPtr hbmp;
+            bool temporary = false;
+            if (!_cacheEnabled || !_hbitmapCache.TryGetValue(src, out hbmp))
+            {
+                // 缓存被内存上限禁用 / 素材刚换：退化为单次绘制，行为与旧版一致
                 using (var canvas = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
                 {
                     using (var g = Graphics.FromImage(canvas))
@@ -374,7 +465,24 @@ namespace WtClickerGUI
                     }
                     hbmp = canvas.GetHbitmap(Color.FromArgb(0));
                 }
-                oldBmp = SelectObject(memDc, hbmp);
+                temporary = true;
+            }
+
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            if (screenDc == IntPtr.Zero)
+            {
+                if (temporary && hbmp != IntPtr.Zero) DeleteObject(hbmp);
+                return;
+            }
+            try
+            {
+                EnsureDevice(screenDc);
+                // Win32 物理像素定位，绕开 WinForms 的 DPI 缩放（SetBounds 实测会偏）
+                if (moved || rebuild || !_lastPainted)
+                    SetWindowPos(Handle, IntPtr.Zero, _posX, _posY, w, h,
+                        SWP_NOZORDER | SWP_NOACTIVATE);
+
+                var oldBmp = SelectObject(_memDc, hbmp);
                 var size = new SIZE { CX = w, CY = h };
                 var ptSrc = new POINT { X = 0, Y = 0 };
                 var ptDst = new POINT { X = _posX, Y = _posY };
@@ -385,27 +493,36 @@ namespace WtClickerGUI
                     SourceConstantAlpha = 255,
                     AlphaFormat = AC_SRC_ALPHA,
                 };
-                UpdateLayeredWindow(Handle, screenDc, ref ptDst, ref size, memDc,
+                bool ok = UpdateLayeredWindow(Handle, screenDc, ref ptDst, ref size, _memDc,
                     ref ptSrc, 0, ref blend, ULW_ALPHA);
+                if (oldBmp != IntPtr.Zero) SelectObject(_memDc, oldBmp);
+                if (ok)
+                {
+                    _lastSrc = src; _lastX = _posX; _lastY = _posY; _lastPainted = true;
+                    Interlocked.Increment(ref _renderCalls);
+                }
             }
             finally
             {
-                if (oldBmp != IntPtr.Zero) SelectObject(memDc, oldBmp);
-                if (hbmp != IntPtr.Zero) DeleteObject(hbmp);
-                DeleteDC(memDc);
                 ReleaseDC(IntPtr.Zero, screenDc);
+                if (temporary && hbmp != IntPtr.Zero) DeleteObject(hbmp);
             }
         }
 
         protected override void OnVisibleChanged(EventArgs e)
         {
             base.OnVisibleChanged(e);
-            if (Visible) Render(Current());
+            if (Visible) { ForceRepaint(); Render(Current()); }
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) _timer.Dispose();
+            if (disposing)
+            {
+                _timer.Dispose();
+                InvalidateCache();
+                if (_memDc != IntPtr.Zero) { DeleteDC(_memDc); _memDc = IntPtr.Zero; }
+            }
             base.Dispose(disposing);
         }
     }

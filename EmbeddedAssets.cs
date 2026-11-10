@@ -75,10 +75,29 @@ namespace WtClickerGUI
                 }
                 FileCount = names.Length;
 
-                // 内容签名 = 资源名 + 每个资源内容的 SHA256。素材或 exe 一变就
-                // 自动重释放，不需要用户手动删缓存；正常情况下只读一次 stamp 返回。
-                // ★ 2026-11-10：原实现只拼「长度」，重新抠图后若某帧压缩后大小
-                //   恰好不变，旧缓存不会覆盖，用户会一直看到旧素材。改用内容哈希。
+                // ★ 2026-11-10 性能：原来每次启动都把全部内嵌素材流读出来算
+                //   SHA256（16MB PNG），只为判断缓存是否过期。资源是编译进同一
+                //   个模块的 EmbeddedResource，ModuleVersionId 随模块内容变化，
+                //   所以「MVID 相同 + 释放目录文件齐全」就足以判定缓存有效，
+                //   正常启动一次资源流都不用碰，冷启动明显变快。
+                string buildId = asm.ManifestModule.ModuleVersionId.ToString("N");
+                string stamp = Path.Combine(root, ".stamp");
+                string cachedStamp = "";
+                try { if (File.Exists(stamp)) cachedStamp = File.ReadAllText(stamp); } catch { }
+                if (cachedStamp.StartsWith(buildId + ":", StringComparison.Ordinal) &&
+                    Directory.Exists(CharactersDir))
+                {
+                    try
+                    {
+                        int onDisk = Directory.GetFiles(CharactersDir, "*", SearchOption.AllDirectories).Length;
+                        if (onDisk >= names.Length) return;   // 命中：跳过 SHA256 与全部解压
+                    }
+                    catch { /* 目录被外部改动则走下面的完整重建 */ }
+                }
+
+                // 未命中才计算内容签名（资源名 + 每个资源内容的 SHA256）。
+                // ★ 2026-11-10：早期实现只拼「长度」，重新抠图后若某帧压缩后大小
+                //   恰好不变，旧缓存不会覆盖，用户会一直看到旧素材，故必须用内容哈希。
                 var sb = new StringBuilder();
                 foreach (string n in names.OrderBy(x => x, StringComparer.Ordinal))
                 {
@@ -88,10 +107,6 @@ namespace WtClickerGUI
                 }
                 string sig = Convert.ToHexString(
                     SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).Substring(0, 16);
-
-                string stamp = Path.Combine(root, ".stamp");
-                if (File.Exists(stamp) && File.ReadAllText(stamp) == sig &&
-                    Directory.Exists(CharactersDir)) return;
 
                 Directory.CreateDirectory(CharactersDir);
                 foreach (string n in names)
@@ -105,7 +120,9 @@ namespace WtClickerGUI
                     using var outFs = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None);
                     src.CopyTo(outFs);
                 }
-                File.WriteAllText(stamp, sig);
+                // 旧版 stamp 是纯 16 位 sig；加上 buildId 前缀后首次升级会自然
+                // 失配并重建一次，之后一直走快速短路。
+                File.WriteAllText(stamp, buildId + ":" + sig);
             }
             catch (Exception ex)
             {

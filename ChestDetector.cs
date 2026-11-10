@@ -18,6 +18,17 @@ namespace WtClickerGUI
         static readonly int[] _tG = new int[TW * TH];
         static readonly int[] _tR = new int[TW * TH];
 
+        // ---- 预计算的「掩码内采样点」（2026-11-10 性能优化）----
+        // 原 MadAt 每次都在 ty/tx 双循环里判断 _tMask[t]、跳过背景像素，并把
+        // 模板颜色从 3 个 int[] 里重新取一遍。搜索窗一个位置要跑 26x34 次，
+        // 而每帧滑窗有上万个位置 —— 实测 60ms/帧，是常驻 CPU 的最大热点。
+        // 这里把「有效采样点」按模板行分组展开成扁平数组：内循环只剩一次加法、
+        // 3 次减法与累加，不再有双重循环、掩码分支和重复索引计算。
+        static int[] _sTx4;        // 采样点列偏移（已乘 4，直接加到 BGRA 行基址）
+        static int[] _sB, _sG, _sR;
+        static int[] _rowStart, _rowEnd, _rowTy;   // 每个模板行的采样点区间
+        static int _sN;            // 有效采样点总数（等价于原实现里的 n）
+
         static bool _loaded;
         static string TplB64()
         {
@@ -352,7 +363,36 @@ namespace WtClickerGUI
                 bool brown = r > 90 && r < 210 && g > 55 && g < 160 && b > 25 && b < 120 && r > g + 20 && g > b + 15;
                 _tMask[i] = cream || brown;
             }
+            BuildSamples();
             _loaded = true;
+        }
+
+        /// <summary>
+        /// 把原 MadAt 的「ty += 3 / tx += 3 / if (!_tMask[t]) continue」展开成扁平表。
+        /// 采样顺序、有效点集合、模板颜色与原实现逐点一致，因此返回值逐位相同。
+        /// </summary>
+        static void BuildSamples()
+        {
+            var tx4 = new List<int>();
+            var bs = new List<int>(); var gs = new List<int>(); var rs = new List<int>();
+            var starts = new List<int>(); var ends = new List<int>(); var tys = new List<int>();
+            for (int ty = 0; ty < TH; ty += 3)
+            {
+                int start = tx4.Count;
+                for (int tx = 0; tx < TW; tx += 3)
+                {
+                    int t = ty * TW + tx;
+                    if (!_tMask[t]) continue;
+                    tx4.Add(tx * 4);
+                    bs.Add(_tB[t]); gs.Add(_tG[t]); rs.Add(_tR[t]);
+                }
+                if (tx4.Count == start) continue;   // 该行没有有效采样点
+                starts.Add(start); ends.Add(tx4.Count); tys.Add(ty);
+            }
+            _sTx4 = tx4.ToArray();
+            _sB = bs.ToArray(); _sG = gs.ToArray(); _sR = rs.ToArray();
+            _rowStart = starts.ToArray(); _rowEnd = ends.ToArray(); _rowTy = tys.ToArray();
+            _sN = _sTx4.Length;
         }
 
         /// <summary>
@@ -409,11 +449,14 @@ namespace WtClickerGUI
                 int sx0 = Math.Max(0, x0 - 34), sy0 = Math.Max(0, y0 - 34);
                 int sx1 = Math.Min(w - TW, x1 + 34), sy1 = Math.Min(h - TH, y1 + 34);
                 if (sx1 < sx0 || sy1 < sy0) continue;
-                double bestMad = double.MaxValue; int bx = -1, by = -1;
+                // 初始上界直接取判定阈值：任何 ≥MadThreshold 的位置都不可能被采纳，
+                // 一开始就能触发早停（原来 bestMad=MaxValue 会让第一轮全量算完）。
+                // 全部位置都失败时 bestMad 仍是 MadThreshold，判定依旧为 false，语义等价。
+                double bestMad = MadThreshold; int bx = -1, by = -1;
                 for (int yy = sy0; yy <= sy1; yy += 1)
                     for (int xx = sx0; xx <= sx1; xx += 1)
                     {
-                        double mad = MadAt(bits, w, xx, yy);
+                        double mad = MadAt(bits, w, xx, yy, bestMad);
                         if (mad < bestMad) { bestMad = mad; bx = xx; by = yy; }
                     }
                 if (bestMad < MadThreshold)
@@ -427,31 +470,44 @@ namespace WtClickerGUI
             return result;
         }
 
-        /// <summary>模板 MAD（隔 3 像素采样加速）</summary>
-        static double MadAt(byte[] bits, int w, int px, int py) => MadAtPublic(bits, w, px, py);
-
-        /// <summary>诊断用公开入口</summary>
-        internal static double MadAtPublic(byte[] bits, int w, int px, int py)
+        /// <summary>
+        /// 模板 MAD（隔 3 像素采样）＋ 严格安全的上界早停。
+        ///
+        /// sum 是单调不减的非负和，最终 mad = sum_final / (_sN*3)。若中途
+        /// sum 已 &gt; cutoff*_sN*3，则无论剩余像素如何，最终结果必然 &gt; cutoff，
+        /// 不可能刷新当前 bestMad —— 可以直接返回 MaxValue，不损失任何命中。
+        /// cutoff 传 PositiveInfinity 时永不早停，用于诊断入口保留精确值。
+        /// </summary>
+        static double MadAt(byte[] bits, int w, int px, int py, double cutoff)
         {
-            long sum = 0; int n = 0;
-            for (int ty = 0; ty < TH; ty += 3)
-            {
-                int row = (py + ty) * w * 4 + px * 4;
-                int trow = ty * TW;
-                for (int tx = 0; tx < TW; tx += 3)
-                {
-                    int t = trow + tx;
-                    if (!_tMask[t]) continue;   // 只比对气泡本体，忽略背景像素
-                    int i = row + tx * 4;
-                    int db = bits[i] - _tB[t];
-                    int dg = bits[i + 1] - _tG[t];
-                    int dr = bits[i + 2] - _tR[t];
-                    sum += (db < 0 ? -db : db) + (dg < 0 ? -dg : dg) + (dr < 0 ? -dr : dr);
-                    n++;
-                }
-            }
+            if (!_loaded) EnsureLoaded();
             // 掩码像素太少（如窗口大部分悬空在画面外/落在纯色上）不可信
-            return n < 350 ? double.MaxValue : sum / (n * 3.0);
+            if (_sN < 350) return double.MaxValue;
+            double limit = cutoff * _sN * 3.0;
+            long sum = 0;
+            int w4 = w * 4;
+            for (int r = 0; r < _rowTy.Length; r++)
+            {
+                int rowBase = (py + _rowTy[r]) * w4 + px * 4;
+                int end = _rowEnd[r];
+                for (int k = _rowStart[r]; k < end; k++)
+                {
+                    int i = rowBase + _sTx4[k];
+                    int db = bits[i] - _sB[k];
+                    int dg = bits[i + 1] - _sG[k];
+                    int dr = bits[i + 2] - _sR[k];
+                    sum += (db < 0 ? -db : db) + (dg < 0 ? -dg : dg) + (dr < 0 ? -dr : dr);
+                    // 每 8 个采样点检查一次上界：分支预测代价约 1/8，
+                    // 却能把「明显不匹配」的位置在第一行前段就砍掉。
+                    if ((k & 7) == 7 && sum > limit) return double.MaxValue;
+                }
+                if (sum > limit) return double.MaxValue;
+            }
+            return sum / (_sN * 3.0);
         }
+
+        /// <summary>诊断用公开入口：不做早停，返回与原实现逐位一致的精确 MAD。</summary>
+        internal static double MadAtPublic(byte[] bits, int w, int px, int py)
+            => MadAt(bits, w, px, py, double.PositiveInfinity);
     }
 }
