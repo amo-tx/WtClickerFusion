@@ -1,76 +1,26 @@
 # -*- coding: utf-8 -*-
-"""去掉源视频自带的「贴纸白色描边」，保留角色内部白色（头发/毛球/手套）。
+"""检查/复现「贴纸白描边」去除效果（统一调用 import_nabo.py 的 v6 算法）。
 
-原理（v5）：
-  源帧里角色外轮廓是「蓝/红背景 → 纯白描边(2~4px) → 深色线稿 → 角色内部」。
-  v2/v4 的 GrabCut 把这条白描边一起算进前景，放到深色桌面就成一圈明显白边
-  （用户反馈「还是会有白边」）。边缘带亮度剖面显示白边与内部白色一样亮，
-  说明不是蓝/红残色，而是真正的白色像素。
-
-  只对「距前景边界 <= RIM_W 且近白」的像素削 alpha；内部大块白色（头发、
-  毛球、手套）离边界远，完全不受影响。削掉的区域再用「非白不透明前景」
-  的 normalized convolution 把内侧线稿颜色外扩过去，避免留下半透明白晕。
+★ 2026-11-10：本文件早期的 v5 实现是「固定 dist<=5.5 整条带一刀切」，
+  会把描边薄的帧里紧邻的黑色勾线一起削掉（用户反馈「黑色勾线有些图
+  抠掉了」）。现在不再保留第二份算法，直接复用 import_nabo.strip_sticker_rim，
+  避免两个脚本逻辑分叉把素材削坏。v6 原理见 import_nabo.py 模块顶部。
 
 用法：python strip_white_rim.py [--apply]
   不带 --apply 只生成对照图 _white_edge_trial.png / _white_edge_trial_zoom.png
-  带 --apply 直接覆写 characters/娜波摩/frames/*.png（先备份到 _nabo_v4_backup）
+  带 --apply 直接覆写 characters/娜波摩/frames/*.png
 """
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+from import_nabo import strip_sticker_rim as strip   # 单一算法源：v6
 
 HERE = Path(__file__).parent
 DST = HERE.parent / "characters" / "娜波摩" / "frames"
 BG = (38, 42, 52, 255)
-# ★ 逐像素剖面实测（f00 帽子顶 x=300）：y=39..43 全是纯白描边，dist=1..5，
-#   y=44 才是深色线稿(dist=6)。RIM_W 必须 >=5 才能把白描边整条删干净；
-#   3.2 只削掉一半，剩下的白像素会被颜色外扩当成「内部前景」又刷回边缘，
-#   在深色桌面上表现为一串细碎白点。
-RIM_W = 5.5          # 描边最大宽度（620 高度画布上的像素）
-LUM_MIN = 150        # 近白亮度下限（含抗锯齿的灰白）
-SAT_MAX = 75         # 近白饱和度上限（头发米白带一点黄，约 20~35）
-
-
-def strip(im):
-    arr = np.asarray(im.convert("RGBA")).copy()
-    rgb = arr[..., :3].astype(np.float32)
-    a = arr[..., 3].astype(np.float32) / 255.0
-
-    fg = (a > 0.5).astype(np.uint8)
-    dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
-
-    lum = rgb.mean(2)
-    sat = rgb.max(2) - rgb.min(2)
-    white = (lum > LUM_MIN) & (sat < SAT_MAX)
-
-    # ★ 只删「白色像素」会留下半透明的抗锯齿残边，放大后是一串细碎白点
-    #   （两轮试做放大图实锤）。改为把整条外圈带内缩：白描边连同它的
-    #   灰白过渡一起删掉，深色线稿直接成为新边缘；角色只缩小 ~3px
-    #   （620 高度画布的 0.5%），肉眼不可见，但边缘连续干净。
-    rim = (dist > 0) & (dist <= RIM_W)
-    a2 = a.copy()
-    a2[rim] = 0.0
-    a2 = cv2.GaussianBlur(a2.astype(np.float32), (0, 0), 0.55)
-
-    # 颜色外扩：新边缘带的 RGB 全部取自紧邻的内部不透明像素（帽子处是深色
-    #   线稿、毛球处是纯白），避免透明区纯黑被 GDI+ 缩放插值渗出灰边，
-    #   也避免残留白描边 RGB 形成白晕。
-    src = (a2 > 0.95).astype(np.float32)
-    acc = cv2.GaussianBlur(rgb * src[..., None], (0, 0), 1.0)
-    wgt = cv2.GaussianBlur(src, (0, 0), 1.0) + 1e-6
-    safe = acc / wgt[..., None]
-    rgb2 = rgb.copy()
-    band = (a2 > 0.01) & (a2 < 0.98)
-    rgb2[band] = safe[band]
-    rgb2[a2 <= 0.01] = 0
-
-    out = arr.copy()
-    out[..., :3] = np.clip(rgb2, 0, 255).astype(np.uint8)
-    out[..., 3] = np.clip(a2 * 255, 0, 255).astype(np.uint8)
-    return Image.fromarray(out, "RGBA"), int(rim.sum())
 
 
 def on_dark(im, size=None):

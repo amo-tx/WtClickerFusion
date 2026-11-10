@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""从「娜波摩wuwatappo.mp4」生成 PetForge 兼容角色（v4：真实左右手交替）。
+"""从「娜波摩wuwatappo.mp4」生成 PetForge 兼容角色（v6：保留黑色勾线）。
 
 素材：47 帧 / 20fps / 1280x1280 / 2.35s
   F00-F21 蓝底、平静打字（睁眼微笑）
@@ -54,6 +54,24 @@ v2 抠图链路（已验收，保持不变）：
   处理（strip_sticker_rim）：整条 dist<=5.5 外圈带内缩删除 → 重羽化 →
   边缘带 RGB 用紧邻内部不透明像素颜色外扩 → alpha<=0.01 的像素 RGB 强制清零。
   角色只缩小 ~5px（0.9%），内部白色（头发/毛球/手套）离边界远，完整保留。
+
+★ v6 黑线修复（2026-11-10 用户反馈「人物黑色勾线有些图抠掉了」）：
+  v5 的致命缺陷是「固定宽度整条带一刀切」。源素材外轮廓其实是
+    蓝/红背景 → 白色贴纸描边(厚度随帧/部位在 1~5px 间变化) → 黑色勾线 → 内部
+  描边薄的地方，内侧黑线正好落在 dist<=5.5 这一刀里被一起砍掉；静止帧
+  F20/F26 几乎没有白描边，v5 却仍削 5.5px，于是整圈黑线全丢（实测 F20
+  黑线像素比 v6 少 10212 个）—— 这就是「有些图」特别明显的原因。
+  另外 decontaminate() 把整条半透明带 RGB 换成内部高斯平均色，细黑线被
+  平均成灰棕，是第二个成因。
+  v6 两处一起改：
+  ① strip_sticker_rim() 改为「颜色感知的自适应内缩」：种子取最外层近白
+     像素，geodesic dilation 只在近白候选里向内生长，遇深色线稿自动停刀；
+     白描边多厚就只削多厚，内部白头发/毛球因不与外圈连通而保留。
+  ② decontaminate() 只替换半透明带里的近白像素，深色像素保留原色；
+     颜色外扩改用最近邻搬运（nearest_color）而非高斯平均，黑线不糊。
+  验收（18 帧合计）：深色线稿像素 1,370,261 → 1,456,102（+85,841 / +6.3%），
+  残留白边 19,891 → 1,887（-90.5%），透明区白像素 0.0038% → 0.0000%，
+  深色底 4x 放大 + 0.55 实机缩放复核黑线连续、无白晕。
 
 输出：WtClickerFusion/characters/娜波摩/（frames/*.png + character.json）
 验证：tools/_hand_states.png、tools/_nabo_verify*.png、tools/_nabo_phase.png
@@ -165,14 +183,23 @@ def fg_mask(f, d_main):
 
 
 def decontaminate(rgb, a):
-    """normalized convolution：半透明边缘带只使用内部不透明前景的颜色。"""
+    """v6：只修正半透明带里的「近白污染」，深色线稿保留原色。
+
+    v2~v5 把整条半透明带 (0.01<a<0.98) 的 RGB 一律替换成内部前景的高斯
+    平均色；角色外侧那 1~3px 的黑色勾线正好落在带内，被平均成灰棕色 ——
+    这是用户反馈「黑色勾线有些图抠掉了」的第二个成因（第一个见
+    strip_sticker_rim）。现在只替换近白像素，深色像素原样保留。
+    """
     inner = (a > 0.98).astype(np.float32)
     acc = cv2.GaussianBlur(rgb.astype(np.float32) * inner[..., None], (0, 0), 1.1)
     wgt = cv2.GaussianBlur(inner, (0, 0), 1.1) + 1e-6
     safe = acc / wgt[..., None]
     band = (a > 0.01) & (a < 0.98)
+    lum = rgb.mean(2)
+    sat = rgb.max(2) - rgb.min(2)
+    bad = band & (lum > 110) & (sat < 100)
     out = rgb.astype(np.float32).copy()
-    out[band] = safe[band]
+    out[bad] = safe[bad]
     out[a <= 0.01] = 0
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -188,27 +215,17 @@ def cutout(f, fg):
     return Image.fromarray(out, "RGBA")
 
 
-def strip_sticker_rim(im, rim_w=5.5):
-    """v5：去掉源视频自带的贴纸白描边 + 清零透明区 RGB（详见模块顶部说明）。
-
-    ★ 必须用「整条外圈带内缩」而不是「只删白色像素」：只删白色像素时，
-      抗锯齿灰白像素会残留成半透明细碎白点（两轮试做放大图实锤）。
-    ★ alpha<=0.01 的 RGB 必须清零：否则 GDI+ 缩放会把透明白像素插值进
-      可见边缘，白边在预览 PNG 里看不见、却在实际窗口里很明显。
-    """
+def strip_sticker_rim_v5(im, rim_w=5.5):
+    """【旧版，仅用于对照】v5 的「整条外圈带一刀切」，会连黑色勾线一起砍掉。"""
     arr = np.asarray(im.convert("RGBA")).copy()
     rgb = arr[..., :3].astype(np.float32)
     a = arr[..., 3].astype(np.float32) / 255.0
     fg = (a > 0.5).astype(np.uint8)
     dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
-
     rim = (dist > 0) & (dist <= rim_w)
     a2 = a.copy()
     a2[rim] = 0.0
     a2 = cv2.GaussianBlur(a2.astype(np.float32), (0, 0), 0.55)
-
-    # 颜色外扩：新边缘带 RGB 全部取自紧邻的内部不透明像素 —— 帽子处是深色
-    # 线稿、毛球处是纯白，各自正确，不会互相污染。
     src = (a2 > 0.95).astype(np.float32)
     acc = cv2.GaussianBlur(rgb * src[..., None], (0, 0), 1.0)
     wgt = cv2.GaussianBlur(src, (0, 0), 1.0) + 1e-6
@@ -217,11 +234,106 @@ def strip_sticker_rim(im, rim_w=5.5):
     band = (a2 > 0.01) & (a2 < 0.98)
     rgb2[band] = safe[band]
     rgb2[a2 <= 0.01] = 0
-
     out = arr.copy()
     out[..., :3] = np.clip(rgb2, 0, 255).astype(np.uint8)
     out[..., 3] = np.clip(a2 * 255, 0, 255).astype(np.uint8)
     return Image.fromarray(out, "RGBA")
+
+
+def nearest_color(rgb, known, iters=6):
+    """把不透明前景的 RGB 逐层向外「最近邻」传播，不平均、不抹深色线稿。
+
+    v5 用高斯平均做颜色外扩，帽子深色线稿与旁边白色毛球会被平均成灰棕，
+    细黑线因此糊掉。这里逐层 8 邻域搬运原像素颜色，黑线仍是黑线。
+    """
+    out = rgb.copy()
+    kn = known.copy()
+    h, w = kn.shape
+    for _ in range(iters):
+        target = ~kn
+        if not target.any():
+            break
+        picked = np.zeros((h, w), bool)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                ks = np.roll(kn, (dy, dx), axis=(0, 1)).copy()
+                cs = np.roll(out, (dy, dx), axis=(0, 1))
+                # np.roll 会环绕，屏蔽越界侧
+                if dy > 0:
+                    ks[:dy, :] = False
+                elif dy < 0:
+                    ks[dy:, :] = False
+                if dx > 0:
+                    ks[:, :dx] = False
+                elif dx < 0:
+                    ks[:, dx:] = False
+                take = target & ks & ~picked
+                if take.any():
+                    out[take] = cs[take]
+                    picked |= take
+        kn |= picked
+    return out
+
+
+def strip_sticker_rim(im, rim_max=6.0):
+    """v6：只删「贴着背景的那圈白色贴纸描边」，保留内侧黑色勾线。
+
+    源素材外轮廓的真实结构是：蓝/红背景 → 白色贴纸描边(厚度随帧/随部位
+    在 1~5px 间变化) → 深色(近黑)线稿 → 角色内部。v5 固定砍 dist<=5.5
+    的整条带，描边薄的地方内侧黑线正好落在这一刀里，于是「黑色勾线有些
+    图抠掉了」；描边厚的地方反而还留一点白。
+
+    v6 改成颜色感知的自适应内缩：
+      1. 种子 = 最外层 (dist<=2) 的近白像素；
+      2. geodesic dilation 只在「近白候选」里向内生长 —— 遇到深色线稿
+         (不在候选里) 自动停刀，白描边多厚就只削多厚；
+      3. 候选限制 dist<=rim_max，且必须从外向内连通，因此角色内部的大块
+         白色（头发/毛球/手套）不会被误删；
+      4. 削掉的带再向外吃 1px 抗锯齿灰白，仍只限近白像素，不碰黑线；
+      5. 半透明带颜色用最近邻外扩（不是高斯平均），黑线原色保留；
+      6. alpha<=0.01 的 RGB 强制清零（GDI+ 缩放会把透明白像素插值成白晕）。
+    """
+    arr = np.asarray(im.convert("RGBA")).copy()
+    rgb = arr[..., :3].astype(np.float32)
+    a = arr[..., 3].astype(np.float32) / 255.0
+    fg = (a > 0.5).astype(np.uint8)
+    dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
+
+    lum = rgb.mean(2)
+    sat = rgb.max(2) - rgb.min(2)
+    whitish = (lum > 110) & (sat < 100)          # 含灰白抗锯齿过渡
+    cand = ((fg > 0) & whitish & (dist <= rim_max)).astype(np.uint8)
+    seed = ((fg > 0) & whitish & (dist <= 2.0)).astype(np.uint8)
+
+    k3 = np.ones((3, 3), np.uint8)
+    rim = seed.copy()
+    for _ in range(int(rim_max) + 4):
+        grown = cv2.dilate(rim, k3, iterations=1) & cand
+        if np.array_equal(grown, rim):
+            break
+        rim = grown
+    rim = cv2.dilate(rim, k3, iterations=1) & cand   # 吃掉抗锯齿灰白
+
+    a2 = a.copy()
+    a2[rim > 0] = 0.0
+    a2 = cv2.GaussianBlur(a2.astype(np.float32), (0, 0), 0.55)
+
+    # 最近邻颜色外扩：只给「近白的半透明像素」补色，深色线稿一律保留原色
+    nearest = nearest_color(rgb, a2 > 0.95)
+    rgb2 = rgb.copy()
+    band = (a2 > 0.01) & (a2 < 0.98)
+    bad = band & whitish
+    rgb2[bad] = nearest[bad]
+    rgb2[a2 <= 0.01] = 0
+
+    au8 = np.clip(a2 * 255, 0, 255).astype(np.uint8)
+    rgb2[au8 <= 5] = 0          # 近透明区一律清零，杜绝 GDI+ 插值渗白
+    out = arr.copy()
+    out[..., :3] = np.clip(rgb2, 0, 255).astype(np.uint8)
+    out[..., 3] = au8
+    return Image.fromarray(out, "RGBA"), int((rim > 0).sum())
 
 
 def font(size=16):
@@ -229,7 +341,12 @@ def font(size=16):
     return ImageFont.truetype(p, size) if Path(p).exists() else ImageFont.load_default()
 
 
-def main():
+def build_base_frames():
+    """v2~v4 抠图链路：源视频 → GrabCut/色键/羽化 → 统一裁剪 → 居中画布。
+
+    返回 (imgs, frames, crop, size, bx, canvas, off)。这里产出的画布
+    **尚未去白边**，正好作为 v5/v6 的同一输入基准，便于做同帧对照验收。
+    """
     frames = load_frames()
     print("decoded frames =", len(frames), "size =", frames[0].shape[1::-1])
 
@@ -288,6 +405,104 @@ def main():
         centered[i] = c
     imgs = centered
     print("centered canvas =", (W3, H2), "role center %.0f -> canvas center %.0f" % (cx, (W3 - 1) / 2))
+    return imgs, frames, (x0, y0, x1, y1), size, bx, (W3, H2), off
+
+
+def outline_metrics(im):
+    """验收指标：黑线量 / 残留白边量 / 透明区未清零的白像素占比(%)。"""
+    arr = np.asarray(im.convert("RGBA"))
+    rgb = arr[..., :3].astype(np.float32)
+    a = arr[..., 3].astype(np.float32) / 255.0
+    fg = (a > 0.5).astype(np.uint8)
+    dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
+    lum = rgb.mean(2)
+    sat = rgb.max(2) - rgb.min(2)
+    dark = int(((lum < 90) & (a > 0.5)).sum())
+    white_edge = int(((dist > 0) & (dist <= 3) & (lum > 150)
+                      & (sat < 90) & (a > 0.5)).sum())
+    clear_white = float(((a <= 0.01) & (rgb.min(2) > 200)).mean() * 100)
+    return dark, white_edge, clear_white
+
+
+def on_dark(im):
+    bg = Image.new("RGBA", im.size, (38, 42, 52, 255))
+    bg.alpha_composite(im.convert("RGBA"))
+    return bg.convert("RGB")
+
+
+def write_outline_compare(ref, v5, v6):
+    """源片 / v5 旧版 / v6 新版 三列对照：整帧 + 帽子与手部局部放大。"""
+    ids = [0, 1, 27, 29]
+    CW, CH = 250, 292
+    sheet = Image.new("RGB", (CW * 3, CH * 4 + 34), (236, 236, 236))
+    d = ImageDraw.Draw(sheet)
+    for c, lab in enumerate(["源片（白贴纸描边）", "v5 旧版（黑线被削）", "v6 新版（保留黑线）"]):
+        d.text((c * CW + 8, 6), lab, fill=(0, 0, 0), font=font(15))
+    for r, i in enumerate(ids):
+        for c, im in enumerate([ref[i], v5[i], v6[i]]):
+            t = on_dark(im)
+            t.thumbnail((CW - 8, CH - 30), Image.LANCZOS)
+            x, y = c * CW + 4, r * CH + 30
+            sheet.paste(t, (x, y))
+            d.text((x + 4, y + 2), f"F{i:02d}", fill=(255, 220, 80), font=font(12))
+    sheet.save(HERE / "_outline_compare.png")
+
+    ZW, ZH = 380, 250
+    zoom = Image.new("RGB", (ZW * 3, ZH * 4 + 34), (236, 236, 236))
+    dz = ImageDraw.Draw(zoom)
+    for c, lab in enumerate(["源片", "v5 旧版", "v6 新版"]):
+        dz.text((c * ZW + 8, 6), lab, fill=(0, 0, 0), font=font(15))
+    for r, (i, box, lab) in enumerate([
+            (0, (0.06, 0.00, 0.94, 0.34), "F00 帽顶/毛球边缘"),
+            (0, (0.08, 0.55, 0.92, 0.98), "F00 手部/键盘边缘"),
+            (27, (0.06, 0.00, 0.94, 0.34), "F27 帽顶/毛球边缘"),
+            (27, (0.08, 0.55, 0.92, 0.98), "F27 双手拍桌边缘")]):
+        for c, im in enumerate([ref[i], v5[i], v6[i]]):
+            W, H = im.size
+            bx2 = (int(W * box[0]), int(H * box[1]), int(W * box[2]), int(H * box[3]))
+            t = on_dark(im).crop(bx2)
+            t = t.resize((ZW - 10, ZH - 28), Image.LANCZOS)
+            x, y = c * ZW + 5, r * ZH + 30
+            zoom.paste(t, (x, y))
+            dz.text((x + 4, y + 2), lab, fill=(255, 220, 80), font=font(12))
+    zoom.save(HERE / "_outline_compare_zoom.png")
+    print("outline compare ->", HERE / "_outline_compare.png", "/ _outline_compare_zoom.png")
+
+
+def main():
+    imgs, frames, crop, size, bx, canvas, off = build_base_frames()
+    W3, H2 = canvas
+    base = {i: im.copy() for i, im in imgs.items()}
+
+    # 源片按完全相同的 crop/resize/居中变换，作为「原本该有的黑线」参考
+    ref = {}
+    for i in ALL:
+        r = Image.fromarray(cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB))
+        r = r.crop(crop).resize(size, Image.LANCZOS).crop(bx)
+        c = Image.new("RGBA", (W3, H2), (0, 0, 0, 0))
+        c.paste(r.convert("RGBA"), (off, 0))
+        ref[i] = c
+
+    v5 = {i: strip_sticker_rim_v5(base[i]) for i in ALL}
+    v6, rim_n = {}, {}
+    for i in ALL:
+        v6[i], rim_n[i] = strip_sticker_rim(base[i])
+    imgs = v6
+
+    write_outline_compare(ref, v5, v6)
+
+    # 数值验收：v5 削掉多少黑线、v6 找回多少，同时白边是否仍被清干净
+    print("\n=== 黑色勾线 / 白边 验收（每帧）===")
+    print(f"{'帧':<8}{'v5黑线':>9}{'v6黑线':>9}{'黑线Δ':>9}"
+          f"{'v5白边':>9}{'v6白边':>9}{'透明白%':>10}{'削除px':>9}")
+    tot = [0, 0, 0, 0]
+    for i in ALL:
+        d5, w5, _ = outline_metrics(v5[i])
+        d6, w6, cw6 = outline_metrics(v6[i])
+        tot[0] += d5; tot[1] += d6; tot[2] += w5; tot[3] += w6
+        print(f"F{i:02d}    {d5:9d}{d6:9d}{d6-d5:+9d}{w5:9d}{w6:9d}{cw6:10.3f}{rim_n[i]:9d}")
+    print(f"{'合计':<8}{tot[0]:9d}{tot[1]:9d}{tot[1]-tot[0]:+9d}{tot[2]:9d}{tot[3]:9d}")
+    assert tot[3] <= tot[2] * 0.15 + 200, "v6 残留白边反而变多，需调参"
 
     outdir = DST / "frames"
     outdir.mkdir(parents=True, exist_ok=True)
@@ -296,12 +511,11 @@ def main():
 
     for i in ALL:
         name = f"f{i:02d}.png"
-        # ★ v5：必须在最终画布（resize + 居中对齐之后）去白边，
-        #   因为 LANCZOS 缩放正是「透明区被染白」的环节。
-        imgs[i] = strip_sticker_rim(imgs[i])
+        # ★ 必须在最终画布（resize + 居中对齐之后）去白边，因为 LANCZOS
+        #   缩放正是「透明区被染白」的环节。
         imgs[i].save(outdir / name)
         a = np.asarray(imgs[i])[..., 3]
-        print(f"  {name}: {imgs[i].size} 透明%={(a < 128).mean()*100:.1f}（已去白边）")
+        print(f"  {name}: {imgs[i].size} 透明%={(a < 128).mean()*100:.1f}（v6 保留黑线）")
 
     def rel(i):
         return f"frames/f{i:02d}.png"
@@ -335,7 +549,12 @@ def main():
                   "slap_l、A 相单独给 slap_r，按点击序号奇偶交替 => 每次点击第一帧即对应手，"
                   "与官方角色逐次同步；A/B/C 三相互不跨组复用，clip 播完自动回 idle "
                   "（C 相双手抬起）形成「本手落下→双手抬起」动感，验收分类零歧义。"
-                  "全部原始帧、零镜像、零合成，角色朝向恒定。",
+                  "全部原始帧、零镜像、零合成，角色朝向恒定。"
+                  "v6（2026-11-10）：修复『黑色勾线有些图被抠掉』——v5 固定砍 "
+                  "dist<=5.5 整条带，描边薄的帧连内侧黑线一起削掉；改为颜色感知"
+                  "自适应内缩（只删与背景连通的白贴纸描边，遇深色线稿停刀）+ "
+                  "半透明带只修正近白像素 + 最近邻颜色外扩。18 帧合计找回深色"
+                  "线稿 85,841 px（+6.3%），残留白边 -90.5%，透明区白像素归零。",
     }
     (DST / "character.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -75,13 +75,16 @@ namespace WtClickerGUI
                 }
                 FileCount = names.Length;
 
-                // 内容签名 = 资源名 + 每个资源长度。素材或 exe 一变就自动重释放，
-                // 不需要用户手动删缓存；正常情况下只读一次 stamp 直接返回。
+                // 内容签名 = 资源名 + 每个资源内容的 SHA256。素材或 exe 一变就
+                // 自动重释放，不需要用户手动删缓存；正常情况下只读一次 stamp 返回。
+                // ★ 2026-11-10：原实现只拼「长度」，重新抠图后若某帧压缩后大小
+                //   恰好不变，旧缓存不会覆盖，用户会一直看到旧素材。改用内容哈希。
                 var sb = new StringBuilder();
                 foreach (string n in names.OrderBy(x => x, StringComparer.Ordinal))
                 {
                     using var s = asm.GetManifestResourceStream(n);
-                    sb.Append(n).Append(':').Append(s?.Length ?? 0).Append('|');
+                    string hash = s == null ? "0" : Convert.ToHexString(SHA256.HashData(s));
+                    sb.Append(n).Append(':').Append(hash).Append('|');
                 }
                 string sig = Convert.ToHexString(
                     SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).Substring(0, 16);
