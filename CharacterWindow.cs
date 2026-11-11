@@ -170,7 +170,24 @@ namespace WtClickerGUI
         //   之后被别的程序抢层级也要能自己爬回来。
         long _topMostRaises;                 // 主动提升次数（/stats 验收用）
         long _nextTopMostCheck;              // 下次巡检时间（Environment.TickCount64）
+
+        // ---- 与原生桌宠的深度/游戏模式同步（见 PetDepth.cs 的实测结论）----
+        bool _nativeBelow;                   // 当前是否被沉到原生画布下面
+        bool _gameMode;                      // 原生是否处于游戏模式（角色仍显示，但不吃鼠标）
+        bool _dragBeforeGameMode;            // 进游戏模式前的用户拖动开关，退出时还原
+        long _nextDepthCheck;
+        int _wndW = 1, _wndH = 1;            // 当前窗口的物理像素尺寸（渲染时记录）
+        long _depthSwaps;                    // 上下互换次数（/stats 观测抖动）
+        long _gameModeSwitches;              // 游戏模式进出次数
+        bool _depthKnown;                    // 是否已成功读到原生角色脚底
         public long TopMostRaises => Interlocked.Read(ref _topMostRaises);
+        public long DepthSwaps => Interlocked.Read(ref _depthSwaps);
+        public long GameModeSwitches => Interlocked.Read(ref _gameModeSwitches);
+        public bool NativeGameMode => _gameMode;
+        /// <summary>与原生角色的相对层级：above=压在它上面 / below=沉在它下面 / none=没读到原生画布。</summary>
+        public string DepthMode => !_depthKnown ? "none" : (_nativeBelow ? "below" : "above");
+        /// <summary>进入/退出游戏模式时触发（UI 线程），供主窗体写日志。</summary>
+        public event Action<bool> GameModeChanged;
 
         /// <summary>真正插到置顶带最上层；SWP_NOACTIVATE 保证不抢焦点。</summary>
         void ForceTopMost()
@@ -217,12 +234,122 @@ namespace WtClickerGUI
             if (force || NeedsTopMostRaise()) ForceTopMost();
         }
 
+        /// <summary>
+        /// 与原生桌宠同步：①按脚底 Y 决定压在它上面还是沉在它下面（联机桌宠就是这么排的）；
+        /// ②跟随它的游戏模式，游戏模式里整窗鼠标穿透、暂停拖动。
+        /// 每 0.6s 一次；抓帧 40ms 只在需要时做（PetDepth 内部再节流到 1.2s）。
+        /// </summary>
+        void SyncWithNativePet()
+        {
+            if (!IsHandleCreated || !Visible) return;
+            long now = Environment.TickCount64;
+            if (now < _nextDepthCheck) return;
+            _nextDepthCheck = now + 600;
+
+            // ---- ① 游戏模式跟随 ----
+            bool gm = PetDepth.NativeGameMode();
+            if (gm != _gameMode)
+            {
+                if (gm)
+                {
+                    _dragBeforeGameMode = _allowDrag;    // 记住用户原本的拖动开关
+                    _gameMode = true;
+                    SetPassThrough(true);                // 整窗穿透：点击直接落到后面的游戏上
+                }
+                else
+                {
+                    _gameMode = false;
+                    SetPassThrough(!_dragBeforeGameMode); // 还原：原来可拖动就恢复接收鼠标
+                }
+                Interlocked.Increment(ref _gameModeSwitches);
+                try { GameModeChanged?.Invoke(gm); } catch { }
+            }
+
+            // ---- ② 深度：和原生角色比脚底 ----
+            IntPtr render = PetDepth.FindRenderWindow();
+            if (render == IntPtr.Zero) { _depthKnown = false; EnsureTopMost(false); return; }
+            if (!PetDepth.TryMeasureFeet(render, false)) { _depthKnown = false; EnsureTopMost(false); return; }
+
+            int nativeFeet = PetDepth.NativeFeetY;
+            if (nativeFeet <= 0) { _depthKnown = false; EnsureTopMost(false); return; }
+            _depthKnown = true;
+
+            int myFeet = _posY + _wndH;
+            const int HYS = 12;                     // 迟滞：差 12px 内不换，避免边缘抖动
+            bool wantBelow;
+            if (myFeet < nativeFeet - HYS) wantBelow = true;
+            else if (myFeet > nativeFeet + HYS) wantBelow = false;
+            else { if (!_nativeBelow) EnsureTopMost(false); return; }
+
+            // ★ 原生窗口自己也带 WS_EX_TOPMOST，NeedsTopMostRaise() 只认「普通窗口压顶」，
+            //   抓不到「原生置顶窗压在我们上面」这种情况（实测启动后就出现过一次）。
+            //   这里直接按我们与原生画布的先后关系判定，缺什么补什么。
+            bool aboveNative = IsAboveOf(render);
+            if (wantBelow)
+            {
+                if (aboveNative)
+                {
+                    _nativeBelow = true;
+                    Interlocked.Increment(ref _depthSwaps);
+                    ApplyDepth(render);
+                }
+            }
+            else
+            {
+                if (!aboveNative)
+                {
+                    _nativeBelow = false;
+                    Interlocked.Increment(ref _depthSwaps);
+                }
+                EnsureTopMost(false);
+                if (!IsAboveOf(render)) ForceTopMost();      // 原生刚抢过层级 → 立刻抢回来
+            }
+        }
+
+        /// <summary>本窗口是否在 other 之上（沿 z 序往上层走，先遇到 other 就是被它压住）。</summary>
+        bool IsAboveOf(IntPtr other)
+        {
+            IntPtr p = GetWindow(Handle, GW_HWNDPREV);
+            for (int guard = 0; p != IntPtr.Zero && guard < 400; guard++)
+            {
+                if (p == other) return false;
+                p = GetWindow(p, GW_HWNDPREV);
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// above：插到置顶带最上层（压住原生画布里的角色）；
+        /// below：把窗口直接插到原生画布**后面** —— 原生画布是全屏透明的，它画角色以外的
+        /// 地方完全透明，所以我们照样看得见，只有和它角色重叠的那部分被自然遮住，
+        /// 这正是联机桌宠互相遮挡的观感。
+        /// </summary>
+        void ApplyDepth(IntPtr render)
+        {
+            if (_nativeBelow)
+                SetWindowPos(Handle, render, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            else
+                ForceTopMost();
+        }
+
+        /// <summary>只切 WS_EX_TRANSPARENT 位，不动用户拖动开关（游戏模式专用）。</summary>
+        void SetPassThrough(bool on)
+        {
+            if (!IsHandleCreated) return;
+            long bits = GetWindowLongPtr(Handle, GWL_EXSTYLE).ToInt64();
+            if (on) bits |= WS_EX_TRANSPARENT; else bits &= ~WS_EX_TRANSPARENT;
+            SetWindowLongPtr(Handle, GWL_EXSTYLE, new IntPtr(bits));
+        }
+
         /// <summary>true = 允许鼠标按住拖动（同时关闭鼠标穿透）。</summary>
         public bool AllowDrag
         {
             get => _allowDrag;
             set
             {
+                // 游戏模式里一律不吃鼠标（与原生角色一致）：只记录用户意图，
+                // 等退出游戏模式再真正生效，避免勾选拖动后把游戏点击吃掉。
+                if (_gameMode) { _dragBeforeGameMode = value; return; }
                 if (_allowDrag == value) return;
                 _allowDrag = value;
                 if (!IsHandleCreated) return;
@@ -361,7 +488,7 @@ namespace WtClickerGUI
         /// </summary>
         void Tick(object sender, EventArgs e)
         {
-            EnsureTopMost(false);        // 掉层自动爬回置顶层（内部节流，最多 0.8s 巡检一次）
+            SyncWithNativePet();         // 跟随原生桌宠的深度与游戏模式（内部节流 0.6s）
             if (_frames == null || !Visible) return;
             var idle = Clip("idle");
             if (idle == null) return;
@@ -506,6 +633,7 @@ namespace WtClickerGUI
             if (src == null || !IsHandleCreated) return;
             int w = Math.Max(1, (int)Math.Round(src.Width * _scale));
             int h = Math.Max(1, (int)Math.Round(src.Height * _scale));
+            _wndW = w; _wndH = h;                        // 深度排序要用自己的脚底 Y
             bool rebuild = w != _cacheW || h != _cacheH || _cacheScale < 0
                            || Math.Abs(_scale - _cacheScale) > 1e-9;
             if (rebuild) RebuildCache(w, h);

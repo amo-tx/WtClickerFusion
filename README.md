@@ -12,7 +12,7 @@
 
 到 **[Releases / 最新版](https://github.com/amo-tx/WtClickerFusion/releases/latest)** 下载 **`WtClickerFusion.exe`**（约 167 MB，Windows 10/11 x64）：
 
-> **当前版本 `v1.2.1`**（2026-11-11 桌宠置顶修复版）。修复「自定义角色没有始终显示在最顶层」：原来窗口只有 `WS_EX_TOPMOST` 样式位、并不在置顶带里，会被游戏/浏览器/聊天窗口盖住；现在显示与换角色时显式插入置顶带，掉层后 0.8s 内自动爬回。同时包含 v1.2.0 的一键黑色 UI、v1.1.2 的 CPU / 内存优化、黑色勾线修复、WebView2 资源治理与长按修复。旧 tag 的源码包不含后续修复，**需要源码请用最新版 tag**。
+> **当前版本 `v1.2.2`**（2026-11-11 遮挡与游戏模式对齐版）。新增：自定义角色与原生桌宠的**遮挡关系按脚底 Y 自动排序**（和联机桌宠一致：谁更靠前谁在上面），并**跟随原生桌宠的游戏模式**（游戏模式里保持显示但整窗鼠标穿透）。同时包含 v1.2.1 的置顶修复、v1.2.0 的一键黑色 UI、v1.1.2 的 CPU / 内存优化、黑色勾线修复、WebView2 资源治理与长按修复。旧 tag 的源码包不含后续修复，**需要源码请用最新版 tag**。
 
 1. 下载到任意文件夹（桌面、下载目录都行）。
 2. **双击它**。
@@ -102,6 +102,32 @@
 | 观测 | `GET /stats` 新增 `petTopMostRaises`：累计主动提升次数。正常启动为 1，长时间挂机不增长（换角色/拖动各 +1） |
 
 `tools/verify_pet_topmost.py <PID>` 覆盖 5 项：基线确实在置顶带、普通窗口压上来后仍在最顶、`HWND_NOTOPMOST` 强行踢出后 2.5s 内自愈、静置 4s 提升次数不增长、提升过程不抢前台焦点。
+
+---
+
+## 与原生桌宠的遮挡关系 + 游戏模式跟随（v1.2.2）
+
+用户要求：**自定义角色和原生桌宠之间的遮挡关系按「联机桌宠」的处理方式处理；WuwaTappo 有游戏模式，自定义角色行为要与原生角色一致。**
+
+先量清楚原生是怎么做的（Win32 探针 + 它的运行日志，不是猜）：
+
+| 实测事实 | 结论 |
+| --- | --- |
+| 原生把角色画在**一个全屏透明置顶窗**里（class `Tauri Window`、title `Wuwa Tappo`、2560×1600、`WS_EX_LAYERED｜WS_EX_TRANSPARENT｜WS_EX_NOACTIVATE`），自机角色与联机角色都在这一张画布上 | 联机桌宠的互相遮挡是它自己画的深度序，外部窗口只要「按前后关系插进这张画布」就等价 |
+| 托盘菜单有 `gameMode` / `alwaysOnTop` / `windowPassthrough` / `windowOpacity`，快捷键 `gameMode` = **F10** | 游戏模式是它自带的一档行为 |
+| 打开游戏模式（或它探测到前台全屏应用）时，它把 `DesktopCatInput` 全屏输入层**隐藏**；绘制窗照常置顶可见 | 游戏模式 = **角色照常显示，但完全不吃鼠标**（点击落到后面的游戏上） |
+
+### 实现
+
+| 位置 | 做法 |
+| --- | --- |
+| `PetDepth.cs`（新增） | 定位原生画布窗口；`PrintWindow(PW_RENDERFULLCONTENT)` 抓帧后 1/4 降采样，按行统计非透明像素求出**角色真实脚底 Y**（44ms/次，节流 1.2s，缓冲区复用）；`DesktopCatInput` 可见性 → 原生的游戏模式状态。只读，完全不碰它的进程与设置 |
+| 深度排序 | 我们脚底比原生角色低（更靠前）→ `HWND_TOPMOST` 压在它之上；更高 → `SetWindowPos(handle, 原生画布hwnd)` 直接插到画布**后面**。画布是全屏透明的，所以我们照样看得见，只有和它角色重叠的部位被自然遮住 —— 就是联机桌宠互相遮挡的观感。12px 迟滞防抖 |
+| 层级判定 | 原生窗口自己也带 `WS_EX_TOPMOST`，原来只认「普通窗口压顶」的巡检抓不到它，因此额外用 `IsAboveOf(原生画布)` 直接比对先后关系，缺什么补什么 |
+| 游戏模式跟随 | 原生进游戏模式 → 自定义角色 `WS_EX_TRANSPARENT` 整窗穿透、暂停拖动（用户勾的「可拖动」会被记住，退出后还原）；退出 → 恢复原状 |
+| 观测 | `/stats` 新增 `petDepth`（above/below/none）、`petDepthSwaps`、`petNativeFeet`、`petNativeGameMode`、`petGameModeSwitches`、`petDepthError`（抓帧失败原因） |
+
+`tools/verify_pet_depth.py <PID>` 覆盖 6 项（实机全 PASS）：深度状态与真实 z 序一致、移到屏幕上方自动沉到原生角色之后、移回下方重新压上去、静置 6s 不来回翻转、进入游戏模式后角色仍显示且整窗穿透、退出后状态还原。
 
 ---
 
@@ -218,6 +244,7 @@ python tools/verify_real_input.py <PID>                     # 真实键鼠与注
 python tools/verify_long_press.py                           # 长按只触发一次 / 松开或换键仍逐次触发
 python tools/verify_theme.py <PID> dist/config.ini           # 浅↔深往返切换 + 两套 UI 截图 + 配置持久化
 python tools/verify_pet_topmost.py <PID>                     # 置顶带归属 / 掉层 2.5s 自愈 / 静置不抖动 / 不抢焦点
+python tools/verify_pet_depth.py <PID>                       # 遮挡深度按脚底 Y 排序 / 不抖动 / 跟随原生游戏模式
 dotnet run --project tools/perf-bench -c Release            # 宝箱检测 ms/帧 + MAD 黄金值
 ```
 

@@ -738,6 +738,10 @@ namespace WtClickerGUI
                 {
                     _petWin = new CharacterWindow();
                     _petWin.AllowDrag = _chkPetDrag.Checked;   // Show() 前设置，CreateParams 才会生效
+                    // 跟随原生桌宠的游戏模式：进去就不吃鼠标（和原生一致），出来还原拖动开关
+                    _petWin.GameModeChanged += on => AppendLog(on
+                        ? "🎮 原生桌宠进入游戏模式：自定义角色保持置顶但整窗穿透，不挡游戏操作"
+                        : "🎮 原生桌宠退出游戏模式：恢复常规穿透/拖动行为", on ? 4 : 0);
                 }
                 else _petWin.AllowDrag = _chkPetDrag.Checked;
 
@@ -811,6 +815,13 @@ namespace WtClickerGUI
                 petRenderSkips = _petWin?.RenderSkips ?? 0L,
                 petCachedFrames = _petWin?.CachedFrames ?? 0,
                 petTopMostRaises = _petWin?.TopMostRaises ?? 0L,   // 掉层后主动提升的次数
+                // 与原生桌宠的深度/游戏模式同步（验收用）
+                petDepth = _petWin?.DepthMode ?? "none",           // above / below / none
+                petDepthSwaps = _petWin?.DepthSwaps ?? 0L,         // 上下互换次数（抖动观测）
+                petNativeGameMode = _petWin?.NativeGameMode ?? false,
+                petGameModeSwitches = _petWin?.GameModeSwitches ?? 0L,
+                petNativeFeet = PetDepth.NativeFeetY,              // 原生角色脚底 Y（屏幕物理像素）
+                petDepthError = PetDepth.LastError,                // 抓帧失败原因（诊断）
                 charLibCached = _charLib?.CachedCount ?? 0,
                 theme = UiTheme.Current == ThemeKind.Dark ? "dark" : "light",  // 验收用：当前 UI 风格
                 log = _bridge?.LogTail?.Invoke() ?? Array.Empty<string>(),
