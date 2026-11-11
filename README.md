@@ -12,7 +12,7 @@
 
 到 **[Releases / 最新版](https://github.com/amo-tx/WtClickerFusion/releases/latest)** 下载 **`WtClickerFusion.exe`**（约 167 MB，Windows 10/11 x64）：
 
-> **当前版本 `v1.2.0`**（2026-11-11 双主题版，`SHA256` 前 16 位 `c7b6aa985d36d3a1`，文件 175,067,406 B）。新增**一键切换黑色 UI**（含深色标题栏），并包含此前的 CPU / 内存优化、黑色勾线修复、WebView2 资源治理与长按修复。旧 tag 的源码包不含后续修复，**需要源码请用最新版 tag**。
+> **当前版本 `v1.2.1`**（2026-11-11 桌宠置顶修复版）。修复「自定义角色没有始终显示在最顶层」：原来窗口只有 `WS_EX_TOPMOST` 样式位、并不在置顶带里，会被游戏/浏览器/聊天窗口盖住；现在显示与换角色时显式插入置顶带，掉层后 0.8s 内自动爬回。同时包含 v1.2.0 的一键黑色 UI、v1.1.2 的 CPU / 内存优化、黑色勾线修复、WebView2 资源治理与长按修复。旧 tag 的源码包不含后续修复，**需要源码请用最新版 tag**。
 
 1. 下载到任意文件夹（桌面、下载目录都行）。
 2. **双击它**。
@@ -87,6 +87,21 @@
 | 持久化 / 观测 | `config.ini` 的 `theme=dark\|light`；`GET /stats` 返回 `theme` 字段，便于无界面核验 |
 
 `tools/verify_theme.py <PID>` 会自动点击切换、抓两套截图、验证往返切换与配置落盘。
+
+---
+
+## 桌宠窗口始终置顶（v1.2.1）
+
+角色窗口原来只是「带着 `WS_EX_TOPMOST` 样式位」，实际并不在**置顶带**里 —— 用 Win32 读真实 z 序可以看到它排在鸣潮、浏览器、QQ、主窗口之下，所以会被普通窗口盖住。`TopMost = true` 在句柄创建前设置只保证样式位，真正插进置顶带必须显式调用 `SetWindowPos(HWND_TOPMOST)`。
+
+| 位置 | 做法 |
+| --- | --- |
+| 首次显示 / 换角色 / 重新定位 | `EnsureTopMost(force: true)` → `SetWindowPos(HWND_TOPMOST, SWP_NOMOVE \| SWP_NOSIZE \| SWP_NOACTIVATE)`：只改层级，不动位置尺寸、不抢焦点 |
+| 掉层巡检 | 每 tick 最多 0.8s 检查一次：① `WS_EX_TOPMOST` 样式位是否丢失；② 沿 `GW_HWNDPREV` 上溯，若上方出现任何**可见、未最小化、有面积**的普通窗口即判定掉层（置顶带窗口永远压在所有普通窗口之上）。两种情况任一成立才重新提升，所以静置时 z 序完全不抖 |
+| 与游戏叠加层共存 | 鸣潮的 `CrossRenderWindow`、官方桌宠的全屏透明层这类常驻置顶窗不会被反复争抢 —— 巡检只针对「普通窗口压上来」，不做无条件 z 序重排，避免每秒重排造成闪烁 |
+| 观测 | `GET /stats` 新增 `petTopMostRaises`：累计主动提升次数。正常启动为 1，长时间挂机不增长（换角色/拖动各 +1） |
+
+`tools/verify_pet_topmost.py <PID>` 覆盖 5 项：基线确实在置顶带、普通窗口压上来后仍在最顶、`HWND_NOTOPMOST` 强行踢出后 2.5s 内自愈、静置 4s 提升次数不增长、提升过程不抢前台焦点。
 
 ---
 
@@ -191,7 +206,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
 | `docs/` | 本 README 使用的示意图 |
 | `tools/import_nabo.py`、`strip_white_rim.py`、`white_edge_check.py` | 角色抠图、去白边、边缘复核 |
 | `tools/extract_frames.py`、`analyze_hands.py`、`hand_states.py` | 视频逐帧导出与动作相位分析 |
-| `tools/verify_*.py` | 实机验收：角色切换、动画状态机、点击同步、真实键鼠输入、UI 主题往返与截图 |
+| `tools/verify_*.py` | 实机验收：角色切换、动画状态机、点击同步、真实键鼠输入、UI 主题往返与截图、桌宠置顶与掉层自愈 |
 | `tools/perf-bench/` | 宝箱检测微基准（独立 .NET 控制台工程，直接链接主程序 `ChestDetector.cs`） |
 
 验收示例（`<PID>` 为运行中的进程号）：
@@ -202,6 +217,7 @@ python tools/verify_nabo_states.py <PID> 30                 # 30 秒左右手交
 python tools/verify_real_input.py <PID>                     # 真实键鼠与注入去重
 python tools/verify_long_press.py                           # 长按只触发一次 / 松开或换键仍逐次触发
 python tools/verify_theme.py <PID> dist/config.ini           # 浅↔深往返切换 + 两套 UI 截图 + 配置持久化
+python tools/verify_pet_topmost.py <PID>                     # 置顶带归属 / 掉层 2.5s 自愈 / 静置不抖动 / 不抢焦点
 dotnet run --project tools/perf-bench -c Release            # 宝箱检测 ms/帧 + MAD 黄金值
 ```
 

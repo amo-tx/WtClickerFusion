@@ -810,6 +810,7 @@ namespace WtClickerGUI
                 petRenderCalls = _petWin?.RenderCalls ?? 0L,
                 petRenderSkips = _petWin?.RenderSkips ?? 0L,
                 petCachedFrames = _petWin?.CachedFrames ?? 0,
+                petTopMostRaises = _petWin?.TopMostRaises ?? 0L,   // 掉层后主动提升的次数
                 charLibCached = _charLib?.CachedCount ?? 0,
                 theme = UiTheme.Current == ThemeKind.Dark ? "dark" : "light",  // 验收用：当前 UI 风格
                 log = _bridge?.LogTail?.Invoke() ?? Array.Empty<string>(),

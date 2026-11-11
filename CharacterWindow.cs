@@ -17,6 +17,9 @@ namespace WtClickerGUI
     /// - 默认 WS_EX_TRANSPARENT：鼠标完全穿透，绝不干扰 WindowFromPoint 选空白点、
     ///   不抢真实鼠标、不影响 PostMessage 注入与 PrintWindow 抓帧。
     /// - 需要拖动时由主窗体把 AllowDrag 置 true，动态去掉穿透位。
+    /// - 始终置顶：构造期的 TopMost 只给到 WS_EX_TOPMOST 样式位，不代表真的在
+    ///   置顶带里；显示/换角色/定位后显式 SetWindowPos(HWND_TOPMOST) 插入置顶带，
+    ///   并由 Timer 巡检，被别的程序抢走层级时自动爬回。
     /// - 动画全部由 UI 线程 Timer 驱动；NotifyClick 可在引擎线程安全调用
     ///   （只用 Interlocked，绝不跨线程碰 UI）。
     /// </summary>
@@ -27,16 +30,22 @@ namespace WtClickerGUI
         const int WS_EX_TRANSPARENT = 0x00000020;
         const int WS_EX_NOACTIVATE = 0x08000000;
         const int WS_EX_TOOLWINDOW = 0x00000080;
+        const int WS_EX_TOPMOST = 0x00000008;
         const int GWL_EXSTYLE = -20;
         const byte AC_SRC_OVER = 0;
         const byte AC_SRC_ALPHA = 1;
         const uint ULW_ALPHA = 0x00000002;
         const uint SWP_NOZORDER = 0x0004;
         const uint SWP_NOACTIVATE = 0x0010;
+        const uint SWP_NOSIZE = 0x0001;
+        const uint SWP_NOMOVE = 0x0002;
+        const int GW_HWNDPREV = 3;               // z 序：上一个（更靠上层）的窗口
+        static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         const int SM_CXSCREEN = 0, SM_CYSCREEN = 1;
 
         [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
         [StructLayout(LayoutKind.Sequential)] struct SIZE { public int CX, CY; }
+        [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
         [StructLayout(LayoutKind.Sequential)]
         struct BLENDFUNCTION
         {
@@ -49,6 +58,10 @@ namespace WtClickerGUI
             ref BLENDFUNCTION pblend, uint dwFlags);
         [DllImport("user32.dll", SetLastError = true)]
         static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
         [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
         [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
         [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
@@ -149,6 +162,61 @@ namespace WtClickerGUI
         protected override void OnPaintBackground(PaintEventArgs e) { }
         protected override void OnPaint(PaintEventArgs e) { }
 
+        // ---------------------------------------------------------------- 置顶保持
+        // ★ 2026-11-11 用户反馈「自定义角色没有始终显示在最顶层」。实测运行中的
+        //   角色窗口 exstyle 带 WS_EX_TOPMOST，但真实 z 序排在鸣潮 / 浏览器 / QQ /
+        //   主窗口之下 —— 有置顶**样式位**却不在置顶**带**里。构造期设 TopMost=true
+        //   只保证样式位，真正插进置顶带必须显式 SetWindowPos(HWND_TOPMOST)；
+        //   之后被别的程序抢层级也要能自己爬回来。
+        long _topMostRaises;                 // 主动提升次数（/stats 验收用）
+        long _nextTopMostCheck;              // 下次巡检时间（Environment.TickCount64）
+        public long TopMostRaises => Interlocked.Read(ref _topMostRaises);
+
+        /// <summary>真正插到置顶带最上层；SWP_NOACTIVATE 保证不抢焦点。</summary>
+        void ForceTopMost()
+        {
+            if (!IsHandleCreated) return;
+            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            Interlocked.Increment(ref _topMostRaises);
+        }
+
+        /// <summary>
+        /// 是否需要重新插入置顶带，两种情况：
+        /// 1) WS_EX_TOPMOST 样式位丢了（被别的程序 SetWindowPos(HWND_NOTOPMOST) 之类改掉）；
+        /// 2) 样式位还在，但已被**普通**窗口压住 —— 置顶带里的窗口永远压在所有普通窗口
+        ///    之上，所以上面只要有普通窗口就一定不在带内（本次用户反馈的正是这种）。
+        /// 最小化窗口仍留在 z 序里却不遮挡，必须跳过，否则会误判成一直掉层、
+        /// 每秒无谓重排 z 序。
+        /// </summary>
+        bool NeedsTopMostRaise()
+        {
+            if ((GetWindowLongPtr(Handle, GWL_EXSTYLE).ToInt64() & WS_EX_TOPMOST) == 0) return true;
+            IntPtr p = GetWindow(Handle, GW_HWNDPREV);
+            for (int guard = 0; p != IntPtr.Zero && guard < 400; guard++)
+            {
+                if (IsWindowVisible(p) && !IsIconic(p)
+                    && GetWindowRect(p, out var r) && r.Right > r.Left && r.Bottom > r.Top
+                    && (GetWindowLongPtr(p, GWL_EXSTYLE).ToInt64() & WS_EX_TOPMOST) == 0)
+                    return true;
+                p = GetWindow(p, GW_HWNDPREV);
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 置顶巡检：掉层才重新提升，最多 0.8 秒一次，避免和游戏叠加层
+        /// （鸣潮的 CrossRenderWindow 等常驻置顶窗）来回抢 z 序造成闪烁。
+        /// </summary>
+        void EnsureTopMost(bool force)
+        {
+            if (!IsHandleCreated || !Visible) return;
+            long now = Environment.TickCount64;
+            if (!force && now < _nextTopMostCheck) return;
+            _nextTopMostCheck = now + 800;
+            if (force || NeedsTopMostRaise()) ForceTopMost();
+        }
+
         /// <summary>true = 允许鼠标按住拖动（同时关闭鼠标穿透）。</summary>
         public bool AllowDrag
         {
@@ -216,6 +284,7 @@ namespace WtClickerGUI
             // Render 会跳过，Show() 之后 Place() 再按屏幕尺寸定位一次。
             Render(Current());
             if (!_timer.Enabled) _timer.Start();
+            EnsureTopMost(true);      // 换角色/换尺寸后重新插回置顶带最上层
         }
 
         public void SetScale(double scale)
@@ -248,6 +317,7 @@ namespace WtClickerGUI
                 default: _posX = sw - w - m; _posY = sh - h - taskbar; break;   // 右下
             }
             Render(Current());
+            EnsureTopMost(false);     // 拖动/重新定位后仍需在顶层
         }
 
         /// <summary>一次「tap」= 引擎注入成功 或 用户真实鼠标/键盘输入，两个来源共用序号。
@@ -291,6 +361,7 @@ namespace WtClickerGUI
         /// </summary>
         void Tick(object sender, EventArgs e)
         {
+            EnsureTopMost(false);        // 掉层自动爬回置顶层（内部节流，最多 0.8s 巡检一次）
             if (_frames == null || !Visible) return;
             var idle = Clip("idle");
             if (idle == null) return;
@@ -512,7 +583,7 @@ namespace WtClickerGUI
         protected override void OnVisibleChanged(EventArgs e)
         {
             base.OnVisibleChanged(e);
-            if (Visible) { ForceRepaint(); Render(Current()); }
+            if (Visible) { ForceRepaint(); Render(Current()); EnsureTopMost(true); }
         }
 
         protected override void Dispose(bool disposing)
